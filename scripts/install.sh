@@ -69,7 +69,7 @@ API_DOMAIN="${API_DOMAIN:-api.playrservers.com}"
 INSTALL_NGINX="${INSTALL_NGINX:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ENV_FILE="${APP_ENV_FILE:-/etc/manage-playrservers.env}"
-DEFAULT_APP_REPO="${DEFAULT_APP_REPO:-https://github.com/PlayrServers/Management.git}"
+DEFAULT_APP_REPO="${DEFAULT_APP_REPO:-https://github.com/PlayrTBH/Management.git}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 PROJECT_ROOT=""
@@ -92,6 +92,7 @@ if [[ "$INSTALL_NGINX" == "1" ]]; then
 fi
 
 FAILED=0
+SERVICE_ACTIVE=0
 
 on_error() {
     local line=$1
@@ -103,11 +104,16 @@ on_error() {
 
 on_exit() {
     if [[ $FAILED -eq 0 ]]; then
-        log_success "Installation complete. Service '${SERVICE_NAME}' is active."
-        log_info "Management UI: http://${APP_HOST}:${APP_PORT}"
-        log_info "API endpoint: http://${APP_API_HOST}:${APP_API_PORT}"
-        log_info "Environment overrides: ${ENV_FILE}"
-        log_info "Expose https://${APP_DOMAIN} and https://${API_DOMAIN} via your reverse proxy."
+        if [[ $SERVICE_ACTIVE -eq 1 ]]; then
+            log_success "Installation complete. Service '${SERVICE_NAME}' is active."
+            log_info "Management UI: http://${APP_HOST}:${APP_PORT}"
+            log_info "API endpoint: http://${APP_API_HOST}:${APP_API_PORT}"
+            log_info "Environment overrides: ${ENV_FILE}"
+            log_info "Expose https://${APP_DOMAIN} and https://${API_DOMAIN} via your reverse proxy."
+        else
+            log_warn "Installation finished but the '${SERVICE_NAME}' service is not running."
+            log_warn "Inspect 'journalctl -u ${SERVICE_NAME}' for additional details."
+        fi
     fi
 }
 
@@ -228,7 +234,15 @@ log_info "Reloading systemd units"
 systemctl daemon-reload
 log_info "Enabling and starting ${SERVICE_NAME}"
 systemctl enable --now "$SERVICE_NAME"
-log_success "Systemd service configured."
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+    SERVICE_ACTIVE=1
+    log_success "Systemd service '${SERVICE_NAME}' is active."
+else
+    FAILED=1
+    log_error "Systemd service '${SERVICE_NAME}' failed to start."
+    log_warn "Run 'journalctl -u ${SERVICE_NAME}' to review the failure."
+    exit 1
+fi
 
 if [[ "$INSTALL_NGINX" == "1" ]]; then
     log_step "Configuring nginx reverse proxy"

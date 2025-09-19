@@ -1,0 +1,21 @@
+{% extends "layout.html" %}
+{% block title %}Dashboard · PlayrServers Control Plane{% endblock %}
+{% block content %}
+<div class="card">
+    <h1>Hello, {{ user.name }}!</h1>
+    <p>Manage remote hypervisors and credentials from this hardened control plane.</p>
+    <div class="notice">
+        <strong>API endpoint:</strong>
+        <code>{{ api_base_url }}</code>
+        <p class="muted" style="margin-top: 0.75rem;">
+            Requests from remote agents must target the API host above. Configure your reverse proxy (Cloudflare recommended) to
+            route <code>api.playrservers.com</code> traffic to the `/api` mount of this service.
+        </p>
+    </div>
+    <p>Rotate and retrieve your API credentials from the secure key page. The management interface is separate from the
+    automation API to keep operator workflows isolated from remote agents.</p>
+    <div class="actions">
+        <a href="{{ request.url_for('api_key') }}" class="button">API key &amp; onboarding</a>
+    </div>
+</div>
+{% endblock %}

@@ -18,4 +18,4 @@ if __name__ == "__main__":
     port = int(os.getenv("MANAGEMENT_PORT", "8000"))
     workers = int(os.getenv("MANAGEMENT_WORKERS", "1"))
     reload = _env_flag("MANAGEMENT_RELOAD", False)
-    uvicorn.run("app.api:app", host=host, port=port, reload=reload, workers=workers)
+    uvicorn.run("app:app", host=host, port=port, reload=reload, workers=workers)

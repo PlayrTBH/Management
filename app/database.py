@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from passlib.context import CryptContext
+
 from .models import Agent, User
 
 
@@ -46,6 +48,20 @@ def _hash_api_key(api_key: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", api_key.encode("utf-8"), salt, 600_000)
 
 
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def _hash_password(password: str) -> str:
+    return _pwd_context.hash(password)
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    try:
+        return _pwd_context.verify(password, hashed)
+    except ValueError:
+        return False
+
+
 class Database:
     """Simple wrapper around SQLite for persisting users and agents."""
 
@@ -72,6 +88,7 @@ class Database:
                     api_key_prefix TEXT NOT NULL,
                     api_key_hash TEXT NOT NULL,
                     api_key_salt TEXT NOT NULL,
+                    password_hash TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -94,31 +111,49 @@ class Database:
                 """
             )
 
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(users)").fetchall()
+            }
+            if "password_hash" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
     # ------------------------------------------------------------------
     # User management
     # ------------------------------------------------------------------
-    def create_user(self, name: str, email: Optional[str] = None) -> Tuple[User, str]:
+    def create_user(
+        self,
+        name: str,
+        email: Optional[str],
+        password: str,
+    ) -> Tuple[User, str]:
         """Create a new user and return it along with the generated API key."""
+
+        if not password:
+            raise ValueError("Password must not be empty")
 
         created_at = _current_timestamp()
         api_key = _generate_api_key()
         salt = secrets.token_bytes(16)
         hash_bytes = _hash_api_key(api_key, salt)
         prefix = api_key[:8]
+        password_hash = _hash_password(password)
+        normalized_email = email.strip().lower() if email else None
 
         with self._connect() as conn:
             try:
                 cursor = conn.execute(
                     """
-                    INSERT INTO users (name, email, api_key_prefix, api_key_hash, api_key_salt, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO users (name, email, api_key_prefix, api_key_hash, api_key_salt, password_hash, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         name,
-                        email,
+                        normalized_email,
                         prefix,
                         base64.b64encode(hash_bytes).decode("ascii"),
                         base64.b64encode(salt).decode("ascii"),
+                        password_hash,
                         _serialize_datetime(created_at),
                     ),
                 )
@@ -127,12 +162,22 @@ class Database:
 
             user_id = cursor.lastrowid
 
-        user = User(id=user_id, name=name, email=email, api_key_prefix=prefix, created_at=created_at)
+        user = User(id=user_id, name=name, email=normalized_email, api_key_prefix=prefix, created_at=created_at)
         return user, api_key
 
     def get_user(self, user_id: int) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            return None
+        return self._row_to_user(row)
+
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email.strip().lower(),),
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_user(row)
@@ -152,6 +197,29 @@ class Database:
             if hmac.compare_digest(expected_hash, calculated):
                 return self._row_to_user(row)
         return None
+
+    def authenticate_user(self, email: str, password: str) -> Optional[User]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email = ?",
+                (email.strip().lower(),),
+            ).fetchone()
+        if row is None:
+            return None
+        stored_hash = row["password_hash"]
+        if not stored_hash or not _verify_password(password, stored_hash):
+            return None
+        return self._row_to_user(row)
+
+    def set_user_password(self, user_id: int, password: str) -> None:
+        if not password:
+            raise ValueError("Password must not be empty")
+        password_hash = _hash_password(password)
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (password_hash, user_id),
+            )
 
     def rotate_api_key(self, user_id: int) -> Tuple[User, str]:
         user = self.get_user(user_id)

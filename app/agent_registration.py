@@ -4,7 +4,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import List, Optional
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 
 class AgentProvisioningError(RuntimeError):
@@ -34,18 +37,10 @@ def _env_path(value: Optional[str], default: Path) -> Path:
     return Path(value).expanduser().resolve(strict=False)
 
 
-def _resolve_default_public_key_path(private_key_path: Path) -> Path:
-    """Return the default public key path for a given private key."""
-
-    return Path(str(private_key_path) + ".pub").expanduser().resolve(strict=False)
-
-
 @dataclass(frozen=True)
 class AgentProvisioningSettings:
     """Configuration required to bootstrap new hypervisors via the agent."""
 
-    private_key_path: Path
-    public_key_path: Path
     username: str
     port: int = 22
     allow_unknown_hosts: bool = False
@@ -61,15 +56,6 @@ class AgentProvisioningSettings:
 def load_agent_provisioning_settings() -> AgentProvisioningSettings:
     """Load provisioning settings from environment variables."""
 
-    default_private = Path("/etc/playrservers/ssh/id_ed25519").resolve(strict=False)
-    private_key_path = _env_path(os.getenv("MANAGEMENT_AGENT_PRIVATE_KEY_PATH"), default_private)
-
-    public_env = os.getenv("MANAGEMENT_AGENT_PUBLIC_KEY_PATH")
-    if public_env:
-        public_key_path = Path(public_env).expanduser().resolve(strict=False)
-    else:
-        public_key_path = _resolve_default_public_key_path(private_key_path)
-
     username = os.getenv("MANAGEMENT_AGENT_USERNAME", "hvdeploy").strip() or "hvdeploy"
     port = _env_int(os.getenv("MANAGEMENT_AGENT_SSH_PORT"), 22)
     allow_unknown_hosts = _env_bool(os.getenv("MANAGEMENT_AGENT_ALLOW_UNKNOWN_HOSTS"), False)
@@ -82,8 +68,6 @@ def load_agent_provisioning_settings() -> AgentProvisioningSettings:
     )
 
     return AgentProvisioningSettings(
-        private_key_path=private_key_path,
-        public_key_path=public_key_path,
         username=username,
         port=port,
         allow_unknown_hosts=allow_unknown_hosts,
@@ -92,51 +76,31 @@ def load_agent_provisioning_settings() -> AgentProvisioningSettings:
     )
 
 
-def _read_file(path: Path) -> str:
+def generate_provisioning_key_pair() -> tuple[str, str]:
+    """Generate a new Ed25519 SSH key pair for provisioning agents."""
+
     try:
-        data = path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise AgentProvisioningError(f"File not found: {path}") from exc
-    except OSError as exc:  # pragma: no cover - filesystem error
-        raise AgentProvisioningError(f"Failed to read {path}: {exc}") from exc
-    return data
+        private_key = ed25519.Ed25519PrivateKey.generate()
+    except Exception as exc:  # pragma: no cover - cryptography failure is exceptional
+        raise AgentProvisioningError("Failed to generate provisioning key material") from exc
 
+    private_text = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8").strip()
 
-def load_private_key(settings: AgentProvisioningSettings) -> str:
-    """Return the management SSH private key used for new agents."""
+    public_text = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    ).decode("utf-8").strip()
 
-    contents = _read_file(settings.private_key_path).strip()
-    if not contents:
-        raise AgentProvisioningError(
-            f"Management SSH private key at {settings.private_key_path} is empty"
-        )
-    return contents
-
-
-def load_authorized_keys(settings: AgentProvisioningSettings) -> List[str]:
-    """Return the list of authorized public keys for the management account."""
-
-    contents = _read_file(settings.public_key_path)
-    keys: List[str] = [line.strip() for line in contents.splitlines() if line.strip()]
-    if not keys:
-        raise AgentProvisioningError(
-            f"Management SSH public key at {settings.public_key_path} is empty"
-        )
-    return keys
-
-
-def iter_authorized_keys(settings: AgentProvisioningSettings) -> Iterable[str]:
-    """Yield the authorized keys for callers that prefer a generator."""
-
-    for key in load_authorized_keys(settings):
-        yield key
+    return private_text, public_text
 
 
 __all__ = [
     "AgentProvisioningError",
     "AgentProvisioningSettings",
-    "iter_authorized_keys",
     "load_agent_provisioning_settings",
-    "load_authorized_keys",
-    "load_private_key",
+    "generate_provisioning_key_pair",
 ]

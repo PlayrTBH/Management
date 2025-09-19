@@ -16,23 +16,13 @@ from app.database import Database
 from app.security import APIKeyAuth
 
 
-PRIVATE_KEY = """-----BEGIN OPENSSH PRIVATE KEY-----\ntest-private-key\n-----END OPENSSH PRIVATE KEY-----""".strip()
-PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey playrservers@example.com"
-
-
 def _build_app(tmp_path: Path, *, settings: AgentProvisioningSettings | None = None):
     database = Database(tmp_path / "db.sqlite3")
     database.initialize()
     user, api_key = database.create_user("Test User", "user@example.com", "long-password-123")
 
     if settings is None:
-        private_key_path = tmp_path / "id_ed25519"
-        private_key_path.write_text(PRIVATE_KEY + "\n", encoding="utf-8")
-        public_key_path = tmp_path / "id_ed25519.pub"
-        public_key_path.write_text(PUBLIC_KEY + "\n", encoding="utf-8")
         settings = AgentProvisioningSettings(
-            private_key_path=private_key_path,
-            public_key_path=public_key_path,
             username="hvdeploy",
             port=22,
             allow_unknown_hosts=False,
@@ -40,31 +30,33 @@ def _build_app(tmp_path: Path, *, settings: AgentProvisioningSettings | None = N
             close_other_sessions=True,
         )
 
+    keys = database.ensure_user_provisioning_keys(user.id)
+
     app = create_app(
         database=database,
         auth=APIKeyAuth(database),
         agent_settings=settings,
     )
 
-    return app, database, user, api_key, settings
+    return app, database, user, api_key, settings, keys
 
 
 def _auth_header(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
 
-def _registration_payload(settings: AgentProvisioningSettings) -> dict[str, object]:
+def _registration_payload(settings: AgentProvisioningSettings, public_key: str) -> dict[str, object]:
     return {
         "hostname": "hv-01",
         "ip_address": "192.0.2.10",
         "platform": "Linux",
         "username": settings.username,
-        "authorized_keys": [PUBLIC_KEY],
+        "authorized_keys": [public_key],
     }
 
 
 def test_account_profile_returns_authorized_keys(tmp_path: Path):
-    app, _, _, api_key, settings = _build_app(tmp_path)
+    app, _, _, api_key, settings, keys = _build_app(tmp_path)
 
     with TestClient(app) as client:
         response = client.get("/v1/account/profile", headers=_auth_header(api_key))
@@ -72,20 +64,20 @@ def test_account_profile_returns_authorized_keys(tmp_path: Path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["username"] == settings.username
-    assert payload["authorized_keys"] == [PUBLIC_KEY]
+    assert payload["authorized_keys"] == [keys.public_key]
 
 
 def test_agent_registration_creates_new_agent(tmp_path: Path):
-    app, database, user, api_key, settings = _build_app(tmp_path)
+    app, database, user, api_key, settings, keys = _build_app(tmp_path)
 
-    payload = _registration_payload(settings)
+    payload = _registration_payload(settings, keys.public_key)
 
     with TestClient(app) as client:
         response = client.post("/v1/servers/connect", json=payload, headers=_auth_header(api_key))
 
     assert response.status_code == 200
     data = response.json()
-    assert data["authorized_keys"] == [PUBLIC_KEY]
+    assert data["authorized_keys"] == [keys.public_key]
     assert data["username"] == settings.username
     assert data["close_other_sessions"] is True
     assert data["hostname"] == "192.0.2.10"
@@ -97,22 +89,16 @@ def test_agent_registration_creates_new_agent(tmp_path: Path):
     assert agent.hostname == "192.0.2.10"
     assert agent.port == settings.port
     assert agent.username == settings.username
-    assert agent.private_key == PRIVATE_KEY
+    assert agent.private_key == keys.private_key
     assert agent.allow_unknown_hosts is False
     assert agent.known_hosts_path is None
 
 
 def test_agent_registration_updates_existing_agent(tmp_path: Path):
-    private_key_path = tmp_path / "management_key"
-    private_key_path.write_text(PRIVATE_KEY + "\n", encoding="utf-8")
-    public_key_path = tmp_path / "management_key.pub"
-    public_key_path.write_text(PUBLIC_KEY + "\n", encoding="utf-8")
     known_hosts_path = tmp_path / "known_hosts"
     known_hosts_path.write_text("example host key\n", encoding="utf-8")
 
     settings = AgentProvisioningSettings(
-        private_key_path=private_key_path,
-        public_key_path=public_key_path,
         username="hvdeploy",
         port=26,
         allow_unknown_hosts=True,
@@ -120,7 +106,7 @@ def test_agent_registration_updates_existing_agent(tmp_path: Path):
         close_other_sessions=False,
     )
 
-    app, database, user, api_key, _ = _build_app(tmp_path, settings=settings)
+    app, database, user, api_key, _, keys = _build_app(tmp_path, settings=settings)
 
     database.create_agent(
         user.id,
@@ -134,14 +120,14 @@ def test_agent_registration_updates_existing_agent(tmp_path: Path):
         known_hosts_path="/tmp/old_known_hosts",
     )
 
-    payload = _registration_payload(settings)
+    payload = _registration_payload(settings, keys.public_key)
 
     with TestClient(app) as client:
         response = client.post("/v1/servers/connect", json=payload, headers=_auth_header(api_key))
 
     assert response.status_code == 200
     data = response.json()
-    assert data["authorized_keys"] == [PUBLIC_KEY]
+    assert data["authorized_keys"] == [keys.public_key]
     assert data["username"] == settings.username
     assert data["close_other_sessions"] is False
     assert data["hostname"] == "192.0.2.10"
@@ -153,19 +139,19 @@ def test_agent_registration_updates_existing_agent(tmp_path: Path):
     assert agent.hostname == "192.0.2.10"
     assert agent.port == settings.port
     assert agent.username == settings.username
-    assert agent.private_key == PRIVATE_KEY
+    assert agent.private_key == keys.private_key
     assert agent.private_key_passphrase is None
     assert agent.allow_unknown_hosts is True
     assert agent.known_hosts_path == str(known_hosts_path)
 
 
 def test_agent_registration_updates_when_ip_changes(tmp_path: Path):
-    app, database, user, api_key, settings = _build_app(tmp_path)
+    app, database, user, api_key, settings, keys = _build_app(tmp_path)
 
     with TestClient(app) as client:
         first = client.post(
             "/v1/servers/connect",
-            json=_registration_payload(settings),
+            json=_registration_payload(settings, keys.public_key),
             headers=_auth_header(api_key),
         )
         assert first.status_code == 200
@@ -173,7 +159,7 @@ def test_agent_registration_updates_when_ip_changes(tmp_path: Path):
         second = client.post(
             "/v1/servers/connect",
             json={
-                **_registration_payload(settings),
+                **_registration_payload(settings, keys.public_key),
                 "ip_address": "192.0.2.20",
             },
             headers=_auth_header(api_key),
@@ -190,7 +176,9 @@ def test_agent_registration_updates_when_ip_changes(tmp_path: Path):
 
 
 def test_private_key_cannot_be_retrieved_via_api(tmp_path: Path):
-    app, database, user, api_key, _ = _build_app(tmp_path)
+    app, database, user, api_key, _, _ = _build_app(tmp_path)
+
+    key_pair = database.ensure_user_provisioning_keys(user.id)
 
     agent = database.create_agent(
         user.id,
@@ -198,7 +186,7 @@ def test_private_key_cannot_be_retrieved_via_api(tmp_path: Path):
         hostname="198.51.100.10",
         port=2222,
         username="hvdeploy",
-        private_key=PRIVATE_KEY,
+        private_key=key_pair.private_key,
         private_key_passphrase="secret-passphrase",
         allow_unknown_hosts=False,
         known_hosts_path=None,
@@ -229,3 +217,16 @@ def test_private_key_cannot_be_retrieved_via_api(tmp_path: Path):
         )
         assert credentials.status_code == 404
 
+
+def test_provisioning_keys_are_unique_per_user(tmp_path: Path):
+    database = Database(tmp_path / "db.sqlite3")
+    database.initialize()
+
+    first_user, _ = database.create_user("First", "first@example.com", "password-12345")
+    second_user, _ = database.create_user("Second", "second@example.com", "password-12345")
+
+    first_keys = database.ensure_user_provisioning_keys(first_user.id)
+    second_keys = database.ensure_user_provisioning_keys(second_user.id)
+
+    assert first_keys.private_key != second_keys.private_key
+    assert first_keys.public_key != second_keys.public_key

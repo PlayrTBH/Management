@@ -34,4 +34,14 @@ class Agent:
     created_at: datetime
 
 
-__all__ = ["Agent", "User"]
+@dataclass(frozen=True)
+class ProvisioningKeyPair:
+    """Stores SSH key material generated for a user profile."""
+
+    user_id: int
+    private_key: str
+    public_key: str
+    created_at: datetime
+
+
+__all__ = ["Agent", "ProvisioningKeyPair", "User"]

@@ -1,4 +1,7 @@
 {% extends "layout.html" %}
+{% block extra_head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+{% endblock %}
 {% block title %}Management · PlayrServers Control Plane{% endblock %}
 {% block content %}
 <div class="stack">
@@ -159,12 +162,21 @@
             Select a hypervisor to populate SSH connection details.
         </div>
         <div id="ssh-section"{% if not selected_agent %} style="display: none;"{% endif %}>
-            <p class="muted">Launch an SSH session to the selected hypervisor or copy the ready-to-run command.</p>
-            <div class="ssh-launch">
-                <a id="ssh-link" class="button secondary" target="_blank" rel="noreferrer noopener" href="#">Open SSH session</a>
-                <code id="ssh-command"></code>
+            <p class="muted">Use the in-browser console to connect to the selected hypervisor or copy the ready-to-run SSH command.</p>
+            <div class="ssh-terminal-wrapper">
+                <div id="ssh-terminal" class="ssh-terminal"></div>
+                <div id="ssh-terminal-overlay" class="ssh-terminal-overlay">Select a hypervisor and click Connect to start a session.</div>
             </div>
-            <p class="help-text">Most desktop environments will hand the SSH URI off to your preferred terminal client.</p>
+            <div class="ssh-controls">
+                <div class="ssh-buttons">
+                    <button type="button" id="ssh-connect" class="button secondary">Connect</button>
+                    <button type="button" id="ssh-disconnect" class="button secondary" disabled>Disconnect</button>
+                    <button type="button" id="ssh-copy-command" class="button secondary">Copy SSH command</button>
+                </div>
+                <span id="ssh-terminal-status" class="ssh-status">Disconnected.</span>
+            </div>
+            <code id="ssh-command"></code>
+            <p class="help-text">Sessions authenticate using the stored automation key and run entirely within your browser.</p>
         </div>
     </div>
 
@@ -176,6 +188,8 @@
     </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script id="agent-data" type="application/json">{{ agents | tojson }}</script>
 <script id="selected-agent" type="application/json">{{ selected_agent | tojson if selected_agent else 'null' }}</script>
 <script id="management-endpoints" type="application/json">{{ endpoints | tojson }}</script>
@@ -204,10 +218,15 @@
     const vmTableWrapper = document.getElementById('vm-table-wrapper');
     const vmTableBody = document.querySelector('#vm-table tbody');
     const agentLabel = document.getElementById('selected-agent-label');
-    const sshLink = document.getElementById('ssh-link');
     const sshCommand = document.getElementById('ssh-command');
     const sshSection = document.getElementById('ssh-section');
     const sshPlaceholder = document.getElementById('ssh-placeholder');
+    const sshTerminalContainer = document.getElementById('ssh-terminal');
+    const sshTerminalOverlay = document.getElementById('ssh-terminal-overlay');
+    const sshConnectButton = document.getElementById('ssh-connect');
+    const sshDisconnectButton = document.getElementById('ssh-disconnect');
+    const sshCopyButton = document.getElementById('ssh-copy-command');
+    const sshStatus = document.getElementById('ssh-terminal-status');
     const hostInfoPlaceholder = document.getElementById('host-info-placeholder');
     const hostInfoSection = document.getElementById('host-info-section');
     const hostInfoMessage = document.getElementById('host-info-message');
@@ -225,6 +244,14 @@
     const hostLoad = document.getElementById('host-load');
 
     let hostInfoTimer = null;
+    let terminal = null;
+    let fitAddon = null;
+    let terminalSocket = null;
+    let terminalAgentId = null;
+    let closingTerminalState = null;
+    const textEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+    const textDecoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
+    const sshCopyButtonLabel = sshCopyButton ? sshCopyButton.textContent : '';
 
     function buildUrl(template, agentId, vmName, action) {
         let url = template.replace('/0/', '/' + agentId + '/');
@@ -236,6 +263,374 @@
         }
         return url;
     }
+
+    function buildWebsocketUrl(template, agentId) {
+        if (!template) {
+            return null;
+        }
+        const replaced = template.replace('/0/', '/' + agentId + '/');
+        try {
+            const url = new URL(replaced, window.location.href);
+            url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+            return url.toString();
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function showTerminalOverlay(message) {
+        if (sshTerminalOverlay) {
+            sshTerminalOverlay.textContent = message;
+            sshTerminalOverlay.style.display = 'flex';
+        }
+    }
+
+    function hideTerminalOverlay() {
+        if (sshTerminalOverlay) {
+            sshTerminalOverlay.style.display = 'none';
+        }
+    }
+
+    function setTerminalStatus(message, isError = false) {
+        if (!sshStatus) {
+            return;
+        }
+        sshStatus.textContent = message;
+        if (isError) {
+            sshStatus.classList.add('error');
+        } else {
+            sshStatus.classList.remove('error');
+        }
+    }
+
+    function ensureTerminal() {
+        if (terminal || !sshTerminalContainer) {
+            return;
+        }
+        if (typeof window.Terminal !== 'function') {
+            showTerminalOverlay('Terminal library failed to load.');
+            setTerminalStatus('Browser terminal unavailable.', true);
+            return;
+        }
+        terminal = new window.Terminal({
+            convertEol: true,
+            cursorBlink: true,
+            fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, "Liberation Mono", Courier, monospace',
+            fontSize: 14,
+            theme: {
+                background: '#0f172a',
+                foreground: '#f8fafc',
+            },
+        });
+        if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+            fitAddon = new window.FitAddon.FitAddon();
+            terminal.loadAddon(fitAddon);
+        }
+        terminal.open(sshTerminalContainer);
+        if (fitAddon) {
+            fitAddon.fit();
+        }
+        terminal.focus();
+        terminal.onData((data) => {
+            if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+                if (textEncoder) {
+                    terminalSocket.send(textEncoder.encode(data));
+                } else {
+                    terminalSocket.send(data);
+                }
+            }
+        });
+    }
+
+    function clearTerminal() {
+        if (terminal) {
+            terminal.reset();
+        }
+    }
+
+    function sendTerminalResize() {
+        if (!terminal || !terminalSocket || terminalSocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        const payload = {
+            type: 'resize',
+            cols: terminal.cols,
+            rows: terminal.rows,
+        };
+        try {
+            terminalSocket.send(JSON.stringify(payload));
+        } catch (_) {
+            // ignore transmission errors
+        }
+    }
+
+    function disconnectTerminal(showMessage = true) {
+        if (!terminalSocket) {
+            if (showMessage) {
+                setTerminalStatus('Disconnected.');
+                showTerminalOverlay('Session disconnected.');
+            }
+            if (sshDisconnectButton) {
+                sshDisconnectButton.setAttribute('disabled', 'true');
+            }
+            if (sshConnectButton) {
+                if (state.selectedAgent) {
+                    sshConnectButton.removeAttribute('disabled');
+                } else {
+                    sshConnectButton.setAttribute('disabled', 'true');
+                }
+            }
+            if (sshCopyButton) {
+                if (sshCopyButtonLabel) {
+                    sshCopyButton.textContent = sshCopyButtonLabel;
+                }
+                if (state.selectedAgent) {
+                    sshCopyButton.removeAttribute('disabled');
+                } else {
+                    sshCopyButton.setAttribute('disabled', 'true');
+                }
+            }
+            terminalAgentId = null;
+            return;
+        }
+        closingTerminalState = showMessage ? 'manual' : 'silent';
+        const socket = terminalSocket;
+        terminalSocket = null;
+        try {
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'close' }));
+            }
+            socket.close();
+        } catch (_) {
+            // ignore close failures
+        }
+    }
+
+    function connectTerminal(agent) {
+        if (!agent) {
+            return;
+        }
+
+        ensureTerminal();
+        if (!terminal) {
+            setTerminalStatus('Browser terminal unavailable.', true);
+            showTerminalOverlay('Unable to initialize terminal component.');
+            return;
+        }
+
+        if (!state.endpoints || !state.endpoints.ssh_terminal) {
+            setTerminalStatus('Terminal endpoint is not configured.', true);
+            showTerminalOverlay('Terminal endpoint is not available.');
+            return;
+        }
+
+        const websocketUrl = buildWebsocketUrl(state.endpoints.ssh_terminal, agent.id);
+        if (!websocketUrl) {
+            setTerminalStatus('Terminal endpoint is not configured.', true);
+            showTerminalOverlay('Terminal endpoint is not available.');
+            return;
+        }
+
+        if (terminalSocket) {
+            if (terminalAgentId === agent.id && terminalSocket.readyState === WebSocket.OPEN) {
+                return;
+            }
+            disconnectTerminal(false);
+        }
+
+        closingTerminalState = null;
+        terminalAgentId = agent.id;
+        setTerminalStatus(`Connecting to ${agent.hostname}…`);
+        showTerminalOverlay(`Connecting to ${agent.hostname}…`);
+
+        if (sshConnectButton) {
+            sshConnectButton.setAttribute('disabled', 'true');
+        }
+        if (sshDisconnectButton) {
+            sshDisconnectButton.removeAttribute('disabled');
+        }
+        if (sshCopyButton) {
+            sshCopyButton.removeAttribute('disabled');
+        }
+
+        clearTerminal();
+
+        try {
+            terminalSocket = new WebSocket(websocketUrl);
+        } catch (_) {
+            terminalSocket = null;
+            setTerminalStatus('Failed to connect.', true);
+            showTerminalOverlay('Failed to establish SSH session.');
+            if (sshConnectButton) {
+                sshConnectButton.removeAttribute('disabled');
+            }
+            if (sshDisconnectButton) {
+                sshDisconnectButton.setAttribute('disabled', 'true');
+            }
+            return;
+        }
+
+        terminalSocket.binaryType = 'arraybuffer';
+
+        terminalSocket.addEventListener('open', () => {
+            setTerminalStatus(`Connected to ${agent.hostname}`);
+            hideTerminalOverlay();
+            if (fitAddon) {
+                fitAddon.fit();
+            }
+            sendTerminalResize();
+        });
+
+        terminalSocket.addEventListener('message', (event) => {
+            if (typeof event.data === 'string') {
+                try {
+                    const payload = JSON.parse(event.data);
+                    if (payload.type === 'status' && payload.status === 'connected') {
+                        hideTerminalOverlay();
+                        return;
+                    }
+                    if (payload.type === 'error') {
+                        setTerminalStatus(payload.message || 'SSH session error.', true);
+                        showTerminalOverlay(payload.message || 'SSH session error.');
+                    }
+                } catch (_) {
+                    // ignore non-JSON control messages
+                }
+                return;
+            }
+
+            if (event.data instanceof ArrayBuffer && terminal) {
+                let text = '';
+                if (textDecoder) {
+                    text = textDecoder.decode(event.data);
+                } else {
+                    const view = new Uint8Array(event.data);
+                    text = Array.from(view).map((code) => String.fromCharCode(code)).join('');
+                }
+                terminal.write(text);
+            }
+        });
+
+        terminalSocket.addEventListener('close', () => {
+            const mode = closingTerminalState;
+            closingTerminalState = null;
+            terminalSocket = null;
+            terminalAgentId = null;
+            if (sshDisconnectButton) {
+                sshDisconnectButton.setAttribute('disabled', 'true');
+            }
+            if (sshConnectButton) {
+                if (state.selectedAgent) {
+                    sshConnectButton.removeAttribute('disabled');
+                } else {
+                    sshConnectButton.setAttribute('disabled', 'true');
+                }
+            }
+            if (sshCopyButton) {
+                if (sshCopyButtonLabel) {
+                    sshCopyButton.textContent = sshCopyButtonLabel;
+                }
+                if (state.selectedAgent) {
+                    sshCopyButton.removeAttribute('disabled');
+                } else {
+                    sshCopyButton.setAttribute('disabled', 'true');
+                }
+            }
+            if (mode !== 'silent') {
+                setTerminalStatus('Disconnected.');
+                showTerminalOverlay('Session disconnected.');
+            }
+        });
+
+        terminalSocket.addEventListener('error', () => {
+            setTerminalStatus('Failed to connect.', true);
+            showTerminalOverlay('Failed to establish SSH session.');
+        });
+    }
+
+    if (sshConnectButton) {
+        sshConnectButton.addEventListener('click', () => {
+            if (state.selectedAgent) {
+                connectTerminal(state.selectedAgent);
+            }
+        });
+    }
+
+    if (sshDisconnectButton) {
+        sshDisconnectButton.addEventListener('click', () => {
+            disconnectTerminal();
+        });
+    }
+
+    if (sshCopyButton) {
+        sshCopyButton.addEventListener('click', async () => {
+            if (!sshCommand) {
+                return;
+            }
+            const text = (sshCommand.textContent || '').trim();
+            if (!text) {
+                return;
+            }
+
+            const restoreLabel = () => {
+                if (sshCopyButtonLabel) {
+                    sshCopyButton.textContent = sshCopyButtonLabel;
+                }
+            };
+
+            const indicateCopied = () => {
+                sshCopyButton.textContent = 'Copied!';
+                window.setTimeout(() => {
+                    restoreLabel();
+                }, 1500);
+            };
+
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    indicateCopied();
+                    return;
+                }
+            } catch (_) {
+                // Fallback to execCommand below
+            }
+
+            try {
+                const helper = document.createElement('textarea');
+                helper.value = text;
+                helper.style.position = 'fixed';
+                helper.style.opacity = '0';
+                helper.style.pointerEvents = 'none';
+                document.body.appendChild(helper);
+                helper.focus();
+                helper.select();
+                const successful = document.execCommand('copy');
+                document.body.removeChild(helper);
+                if (successful) {
+                    indicateCopied();
+                    return;
+                }
+            } catch (_) {
+                // ignore failures and fall through to status update
+            }
+
+            setTerminalStatus('Unable to copy command.', true);
+            window.setTimeout(() => {
+                restoreLabel();
+            }, 1500);
+        });
+    }
+
+    window.addEventListener('resize', () => {
+        if (fitAddon) {
+            fitAddon.fit();
+            sendTerminalResize();
+        }
+    });
+
+    window.addEventListener('beforeunload', () => {
+        disconnectTerminal(false);
+    });
 
     function clearHostInfoTimer() {
         if (hostInfoTimer !== null) {
@@ -568,24 +963,80 @@
     }
 
     function updateSshSection(agent) {
-        if (!sshLink || !sshCommand || !sshSection || !sshPlaceholder) {
+        if (!sshCommand || !sshSection || !sshPlaceholder) {
             return;
         }
         if (!agent) {
             sshSection.style.display = 'none';
             sshPlaceholder.style.display = '';
             sshCommand.textContent = '';
-            sshLink.href = '#';
+            disconnectTerminal(false);
+            showTerminalOverlay('Select a hypervisor and click Connect to start a session.');
+            setTerminalStatus('Disconnected.');
+            if (sshConnectButton) {
+                sshConnectButton.setAttribute('disabled', 'true');
+            }
+            if (sshDisconnectButton) {
+                sshDisconnectButton.setAttribute('disabled', 'true');
+            }
+            if (sshCopyButton) {
+                if (sshCopyButtonLabel) {
+                    sshCopyButton.textContent = sshCopyButtonLabel;
+                }
+                sshCopyButton.setAttribute('disabled', 'true');
+            }
             return;
         }
-        const sshUri = `ssh://${encodeURIComponent(agent.username)}@${agent.hostname}:${agent.port}`;
+
         const command = agent.port === 22
             ? `ssh ${agent.username}@${agent.hostname}`
             : `ssh -p ${agent.port} ${agent.username}@${agent.hostname}`;
-        sshLink.href = sshUri;
         sshCommand.textContent = command;
         sshSection.style.display = '';
         sshPlaceholder.style.display = 'none';
+
+        const connectedToAgent = Boolean(
+            terminalSocket && terminalSocket.readyState === WebSocket.OPEN && terminalAgentId === agent.id,
+        );
+
+        if (terminalAgentId !== null && terminalAgentId !== agent.id) {
+            disconnectTerminal(false);
+        }
+
+        if (connectedToAgent) {
+            hideTerminalOverlay();
+            setTerminalStatus(`Connected to ${agent.hostname}`);
+            if (sshConnectButton) {
+                sshConnectButton.setAttribute('disabled', 'true');
+            }
+            if (sshDisconnectButton) {
+                sshDisconnectButton.removeAttribute('disabled');
+            }
+        } else {
+            showTerminalOverlay(`Click Connect to open a session with ${agent.name}.`);
+            setTerminalStatus('Ready to connect.');
+            if (sshConnectButton) {
+                sshConnectButton.removeAttribute('disabled');
+            }
+            if (sshDisconnectButton) {
+                sshDisconnectButton.setAttribute('disabled', 'true');
+            }
+            clearTerminal();
+            ensureTerminal();
+            if (fitAddon) {
+                requestAnimationFrame(() => {
+                    fitAddon.fit();
+                    sendTerminalResize();
+                });
+            }
+        }
+
+        if (sshCopyButton) {
+            sshCopyButton.removeAttribute('disabled');
+            if (sshCopyButtonLabel) {
+                sshCopyButton.textContent = sshCopyButtonLabel;
+            }
+        }
     }
 
     function updateAgentLabel(agent) {

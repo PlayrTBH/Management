@@ -53,10 +53,32 @@ def _auth_header(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
 
+def _registration_payload(settings: AgentProvisioningSettings) -> dict[str, object]:
+    return {
+        "hostname": "hv-01",
+        "ip_address": "192.0.2.10",
+        "platform": "Linux",
+        "username": settings.username,
+        "authorized_keys": [PUBLIC_KEY],
+    }
+
+
+def test_account_profile_returns_authorized_keys(tmp_path: Path):
+    app, _, _, api_key, settings = _build_app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/account/profile", headers=_auth_header(api_key))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["username"] == settings.username
+    assert payload["authorized_keys"] == [PUBLIC_KEY]
+
+
 def test_agent_registration_creates_new_agent(tmp_path: Path):
     app, database, user, api_key, settings = _build_app(tmp_path)
 
-    payload = {"hostname": "hv-01", "ip_address": "192.0.2.10"}
+    payload = _registration_payload(settings)
 
     with TestClient(app) as client:
         response = client.post("/v1/servers/connect", json=payload, headers=_auth_header(api_key))
@@ -112,7 +134,7 @@ def test_agent_registration_updates_existing_agent(tmp_path: Path):
         known_hosts_path="/tmp/old_known_hosts",
     )
 
-    payload = {"hostname": "hv-01", "ip_address": "192.0.2.10"}
+    payload = _registration_payload(settings)
 
     with TestClient(app) as client:
         response = client.post("/v1/servers/connect", json=payload, headers=_auth_header(api_key))
@@ -138,19 +160,22 @@ def test_agent_registration_updates_existing_agent(tmp_path: Path):
 
 
 def test_agent_registration_updates_when_ip_changes(tmp_path: Path):
-    app, database, user, api_key, _ = _build_app(tmp_path)
+    app, database, user, api_key, settings = _build_app(tmp_path)
 
     with TestClient(app) as client:
         first = client.post(
             "/v1/servers/connect",
-            json={"hostname": "hv-01", "ip_address": "192.0.2.10"},
+            json=_registration_payload(settings),
             headers=_auth_header(api_key),
         )
         assert first.status_code == 200
 
         second = client.post(
             "/v1/servers/connect",
-            json={"hostname": "hv-01", "ip_address": "192.0.2.20"},
+            json={
+                **_registration_payload(settings),
+                "ip_address": "192.0.2.20",
+            },
             headers=_auth_header(api_key),
         )
         assert second.status_code == 200

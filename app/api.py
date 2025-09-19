@@ -4,11 +4,11 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .agent_registration import (
     AgentProvisioningError,
@@ -75,13 +75,51 @@ class AgentCredentialsResponse(AgentResponse):
     private_key_passphrase: Optional[str]
 
 
+class AccountProfileResponse(BaseModel):
+    username: Optional[str] = Field(default=None, max_length=64)
+    authorized_keys: List[str] = Field(..., min_length=1)
+
+
 class AgentConnectRequest(BaseModel):
     hostname: Optional[str] = Field(default=None, max_length=255)
     ip_address: Optional[str] = Field(default=None, max_length=255)
+    username: str = Field(..., min_length=1, max_length=64)
+    authorized_keys: List[str] = Field(..., min_length=1)
     metadata: Dict[str, object] = Field(default_factory=dict)
 
     class Config:
         extra = "allow"
+
+    @field_validator("username")
+    @classmethod
+    def _normalize_username(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("username must not be empty")
+        return stripped
+
+    @field_validator("authorized_keys", mode="before")
+    @classmethod
+    def _normalise_authorized_keys(cls, value: object) -> List[str]:
+        if value is None:
+            raise ValueError("authorized_keys must not be empty")
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            raise ValueError("authorized_keys must be provided as a list of strings")
+        normalised: List[str] = []
+        seen: Set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("authorized_keys must contain only strings")
+            stripped = item.strip()
+            if not stripped or stripped in seen:
+                continue
+            normalised.append(stripped)
+            seen.add(stripped)
+        if not normalised:
+            raise ValueError("authorized_keys must not be empty")
+        return normalised
 
     @staticmethod
     def _normalize(value: Optional[str]) -> Optional[str]:
@@ -225,6 +263,23 @@ def create_app(
     async def read_current_user(current_user: User = Depends(get_current_user)) -> UserResponse:
         return user_to_response(current_user)
 
+    @app.get("/v1/account/profile", response_model=AccountProfileResponse)
+    async def read_account_profile(
+        current_user: User = Depends(get_current_user),
+    ) -> AccountProfileResponse:
+        try:
+            authorized_keys = load_authorized_keys(agent_settings)
+        except AgentProvisioningError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+        return AccountProfileResponse(
+            username=agent_settings.username,
+            authorized_keys=authorized_keys,
+        )
+
     @app.post("/users/me/api-key/rotate", response_model=RotateAPIKeyResponse)
     async def rotate_api_key(current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> RotateAPIKeyResponse:
         refreshed, api_key = db.rotate_api_key(current_user.id)
@@ -281,6 +336,9 @@ def create_app(
         if name is None:
             name = hostname
 
+        configured_username = agent_settings.username.strip() if agent_settings.username else ""
+        resolved_username = configured_username or payload.username
+
         try:
             private_key = load_private_key(agent_settings)
             authorized_keys = load_authorized_keys(agent_settings)
@@ -301,7 +359,7 @@ def create_app(
                 name=name,
                 hostname=hostname,
                 port=agent_settings.port,
-                username=agent_settings.username,
+                username=resolved_username,
                 private_key=private_key,
                 private_key_passphrase=None,
                 allow_unknown_hosts=agent_settings.allow_unknown_hosts,
@@ -315,8 +373,8 @@ def create_app(
                 updates["hostname"] = hostname
             if existing.port != agent_settings.port:
                 updates["port"] = agent_settings.port
-            if existing.username != agent_settings.username:
-                updates["username"] = agent_settings.username
+            if existing.username != resolved_username:
+                updates["username"] = resolved_username
             if existing.private_key != private_key:
                 updates["private_key"] = private_key
             if existing.private_key_passphrase is not None:

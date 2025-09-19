@@ -419,7 +419,9 @@ def create_app(
         agents = database.list_agents_for_user(user.id)
         agent_views = [_agent_to_view(agent) for agent in agents]
         for entry in agent_views:
-            entry["remove_url"] = request.url_for("remove_agent", agent_id=entry["id"])
+            entry["remove_url"] = str(
+                request.url_for("remove_agent", agent_id=entry["id"])
+            )
         selected_agent: Optional[Dict[str, object]] = None
 
         selected_param = request.query_params.get("agent")
@@ -442,17 +444,25 @@ def create_app(
         messages = _consume_flash(request)
 
         endpoints = {
-            "list_vms": request.url_for("management_list_vms", agent_id=0),
-            "vm_info": request.url_for(
-                "management_vm_info", agent_id=0, vm_name="__VM__"
+            "list_vms": str(
+                request.url_for("management_list_vms", agent_id=0)
             ),
-            "vm_action": request.url_for(
-                "management_vm_action",
-                agent_id=0,
-                vm_name="__VM__",
-                action="__ACTION__",
+            "vm_info": str(
+                request.url_for(
+                    "management_vm_info", agent_id=0, vm_name="__VM__"
+                )
             ),
-            "host_info": request.url_for("management_host_info", agent_id=0),
+            "vm_action": str(
+                request.url_for(
+                    "management_vm_action",
+                    agent_id=0,
+                    vm_name="__VM__",
+                    action="__ACTION__",
+                )
+            ),
+            "host_info": str(
+                request.url_for("management_host_info", agent_id=0)
+            ),
         }
 
         return templates.TemplateResponse(

@@ -58,12 +58,14 @@ Environment variables can tweak the installer without editing the script:
 - `INSTALL_NGINX` – set to `0` to skip nginx installation.
 
 After installation the `manage-playrservers` systemd unit supervises both
-services: the management UI listens on `http://127.0.0.1:8000` and the public
-API listens on `http://127.0.0.1:8001`. Publish
-`https://manage.playrservers.com` by proxying requests to the management port
-and forward `https://api.playrservers.com` to the API port (Cloudflare page
-rules or nginx both work). Obtain TLS certificates for both hostnames before
-exposing them to the internet.
+services: the management UI listens on port `8000` and the public API listens on
+port `8001`, binding to all interfaces by default. You can reach the UI directly
+from your LAN using the server's IP address (for example,
+`http://192.168.1.212:8000`). Publish `https://manage.playrservers.com` by
+proxying requests to the management port and forward
+`https://api.playrservers.com` to the API port (Cloudflare page rules or nginx
+both work). Obtain TLS certificates for both hostnames before exposing them to
+the internet.
 
 Provision operator accounts from the server; self-registration is disabled:
 
@@ -200,8 +202,8 @@ MANAGEMENT_RELOAD=true python main.py
 ```
 
 Use `scripts/create_user.py` (or import `Database` in a REPL) to create a user
-locally. The management UI is served on `http://127.0.0.1:8000` and the API on
-`http://127.0.0.1:8001`; target the API base with the issued key to
-exercise the endpoints during development. When testing over plain HTTP you can
-set `MANAGEMENT_SESSION_SECURE=false` to allow the browser to retain the login
-session.
+locally. The management UI is reachable at `http://127.0.0.1:8000` (or via your
+machine's LAN IP) and the API on `http://127.0.0.1:8001`; target the API base
+with the issued key to exercise the endpoints during development. When testing
+over plain HTTP you can set `MANAGEMENT_SESSION_SECURE=false` to allow the
+browser to retain the login session.

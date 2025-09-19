@@ -151,6 +151,11 @@
             border-color: rgba(34, 197, 94, 0.35);
             color: #bbf7d0;
         }
+        .notice.warning {
+            background: rgba(251, 191, 36, 0.12);
+            border-color: rgba(251, 191, 36, 0.35);
+            color: #fef08a;
+        }
         pre {
             background: rgba(15, 23, 42, 0.6);
             border-radius: 12px;
@@ -331,6 +336,31 @@
             padding: 1.5rem;
             color: var(--muted);
             background: rgba(15, 23, 42, 0.4);
+        }
+        .host-info-grid {
+            display: grid;
+            gap: 1.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        }
+        dl.stat-list {
+            margin: 0;
+        }
+        dl.stat-list > div {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 0.4rem 0;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        }
+        dl.stat-list > div:last-child {
+            border-bottom: none;
+        }
+        dl.stat-list dt {
+            font-weight: 600;
+        }
+        dl.stat-list dd {
+            margin: 0;
+            color: var(--muted);
         }
         .status-dot {
             width: 8px;

@@ -105,7 +105,14 @@ def create_app(
             "created_at": agent.created_at.isoformat(),
         }
 
-    def _build_qemu_manager(agent: Agent) -> QEMUManager:
+    def _build_ssh_runner(agent: Agent) -> SSHCommandRunner:
+        override = getattr(app.state, "ssh_runner_factory", None)
+        if callable(override):
+            runner = override(agent)
+            if runner is None:
+                raise RuntimeError("SSH runner override must return a runner instance")
+            return runner
+
         target = SSHTarget(
             hostname=agent.hostname,
             port=agent.port,
@@ -116,7 +123,10 @@ def create_app(
             known_hosts_path=Path(agent.known_hosts_path).expanduser() if agent.known_hosts_path else None,
         )
         factory = SSHClientFactory(target)
-        runner = SSHCommandRunner(factory)
+        return SSHCommandRunner(factory)
+
+    def _build_qemu_manager(agent: Agent) -> QEMUManager:
+        runner = _build_ssh_runner(agent)
         return QEMUManager(runner)
 
     def _command_result_payload(result) -> Dict[str, object]:
@@ -135,6 +145,73 @@ def create_app(
             key, value = line.split(":", 1)
             data[key.strip()] = value.strip()
         return data
+
+    def _parse_loadavg(stdout: str) -> Optional[Dict[str, float]]:
+        parts = stdout.strip().split()
+        if len(parts) < 3:
+            return None
+        try:
+            return {
+                "one": float(parts[0]),
+                "five": float(parts[1]),
+                "fifteen": float(parts[2]),
+            }
+        except ValueError:
+            return None
+
+    def _parse_free(stdout: str) -> Optional[Dict[str, object]]:
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if len(lines) < 2:
+            return None
+
+        header_parts = lines[0].split()
+        mem_line: Optional[List[str]] = None
+        for line in lines[1:]:
+            if line.lower().startswith("mem:"):
+                mem_line = line.split()
+                break
+
+        if mem_line is None:
+            return None
+
+        values = mem_line[1:]
+        keys = header_parts
+        if len(keys) > len(values):
+            keys = keys[-len(values):]
+        elif len(values) > len(keys):
+            values = values[: len(keys)]
+        stats: Dict[str, int] = {}
+        for key, value in zip(keys, values):
+            cleaned_key = (
+                key.strip()
+                .lower()
+                .replace("/", "_")
+                .replace("-", "_")
+                .replace("(", "")
+                .replace(")", "")
+            )
+            try:
+                stats[cleaned_key] = int(value)
+            except ValueError:
+                continue
+
+        total = stats.get("total")
+        used = stats.get("used")
+        free_value = stats.get("free")
+        available = stats.get("available")
+
+        usage_percent: Optional[float] = None
+        if total and used is not None and total > 0:
+            usage_percent = round((used / total) * 100, 2)
+
+        return {
+            "raw": stats,
+            "total_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free_value,
+            "available_bytes": available,
+            "usage_percent": usage_percent,
+        }
 
     def _handle_api_key_rotation(request: Request, user: User) -> RedirectResponse:
         refreshed, api_key = database.rotate_api_key(user.id)
@@ -375,6 +452,7 @@ def create_app(
                 vm_name="__VM__",
                 action="__ACTION__",
             ),
+            "host_info": request.url_for("management_host_info", agent_id=0),
         }
 
         return templates.TemplateResponse(
@@ -590,6 +668,119 @@ def create_app(
                 "result": _command_result_payload(result),
             }
         )
+
+    @app.get("/management/agents/{agent_id}/host-info")
+    async def management_host_info(request: Request, agent_id: int):
+        user = _get_current_user(request)
+        if user is None:
+            return _json_auth_error()
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            return _json_agent_missing()
+
+        runner = _build_ssh_runner(agent)
+
+        try:
+            nodeinfo_result = runner.run(["virsh", "nodeinfo"])
+        except SSHError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={"status": "error", "message": str(exc)},
+            )
+
+        if nodeinfo_result.exit_status != 0:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "status": "error",
+                    "message": "Failed to collect host diagnostics via virsh.",
+                    "result": _command_result_payload(nodeinfo_result),
+                },
+            )
+
+        nodeinfo = _parse_dominfo(nodeinfo_result.stdout)
+
+        warnings: List[str] = []
+        raw_outputs: Dict[str, Dict[str, object]] = {
+            "nodeinfo": _command_result_payload(nodeinfo_result),
+        }
+
+        kernel = None
+        try:
+            kernel_result = runner.run(["uname", "-sr"])
+        except SSHError:
+            kernel_result = None
+
+        if kernel_result is not None:
+            raw_outputs["kernel"] = _command_result_payload(kernel_result)
+            if kernel_result.exit_status == 0:
+                kernel = kernel_result.stdout.strip() or None
+            else:
+                warnings.append("Unable to determine kernel version from remote host.")
+        else:
+            warnings.append("Unable to determine kernel version from remote host.")
+
+        load_average = None
+        try:
+            load_result = runner.run(["cat", "/proc/loadavg"])
+        except SSHError:
+            load_result = None
+
+        if load_result is not None:
+            raw_outputs["loadavg"] = _command_result_payload(load_result)
+            if load_result.exit_status == 0:
+                load_average = _parse_loadavg(load_result.stdout)
+                if load_average is None:
+                    warnings.append("Received unexpected load average data from remote host.")
+            else:
+                warnings.append("Unable to read load averages from remote host.")
+        else:
+            warnings.append("Unable to read load averages from remote host.")
+
+        memory_stats = None
+        try:
+            memory_result = runner.run(["free", "-b"])
+        except SSHError:
+            memory_result = None
+
+        if memory_result is not None:
+            raw_outputs["memory"] = _command_result_payload(memory_result)
+            if memory_result.exit_status == 0:
+                memory_stats = _parse_free(memory_result.stdout)
+                if memory_stats is None:
+                    warnings.append(
+                        "Received unexpected memory statistics from remote host."
+                    )
+            else:
+                warnings.append("Unable to read memory statistics from remote host.")
+        else:
+            warnings.append("Unable to read memory statistics from remote host.")
+
+        timestamp = datetime.utcnow().isoformat() + "Z"
+
+        payload: Dict[str, object] = {
+            "status": "ok",
+            "collected_at": timestamp,
+            "system": {
+                "hostname": agent.hostname,
+                "username": agent.username,
+                "kernel": kernel,
+            },
+            "nodeinfo": nodeinfo,
+            "performance": {
+                "load_average": load_average,
+                "memory": memory_stats,
+            },
+        }
+
+        cleaned_warnings = [message for message in warnings if message]
+        if cleaned_warnings:
+            payload["warnings"] = cleaned_warnings
+
+        payload["raw"] = raw_outputs
+
+        return JSONResponse(content=payload)
 
     return app
 

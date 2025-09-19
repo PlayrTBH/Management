@@ -1,0 +1,4 @@
+# Ignore generated SQLite databases
+*.sqlite3
+*.sqlite
+*.db

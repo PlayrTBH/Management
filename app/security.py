@@ -1,40 +1,33 @@
-"""Security helpers for the management API."""
+"""Security helpers for API key authentication."""
 from __future__ import annotations
-
-import os
-import secrets
-from typing import Iterable, List
 
 from fastapi import HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .database import Database
+from .models import User
 
-class TokenAuth:
-    """Bearer token authentication using constant-time comparisons."""
 
-    def __init__(self, tokens: Iterable[str]):
-        token_list: List[str] = [token.strip() for token in tokens if token.strip()]
-        if not token_list:
-            raise ValueError("At least one API token must be provided")
-        self._tokens = token_list
+class APIKeyAuth:
+    """Bearer token authentication backed by the database."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
         self._bearer = HTTPBearer(auto_error=False)
 
-    async def __call__(self, request: Request) -> None:
+    async def __call__(self, request: Request) -> User:
         credentials: HTTPAuthorizationCredentials | None = await self._bearer(request)  # type: ignore[assignment]
         if credentials is None or credentials.scheme.lower() != "bearer":
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-        provided = credentials.credentials
-        for token in self._tokens:
-            if secrets.compare_digest(provided, token):
-                return None
+        api_key = credentials.credentials.strip()
+        if not api_key:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API token")
-
-
-def load_tokens_from_env() -> List[str]:
-    raw = os.getenv("MANAGEMENT_API_TOKENS", "")
-    return [token.strip() for token in raw.split(",") if token.strip()]
+        user = self._db.get_user_by_api_key(api_key)
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
+        return user
 
 
-__all__ = ["TokenAuth", "load_tokens_from_env"]
+__all__ = ["APIKeyAuth"]

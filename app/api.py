@@ -2,15 +2,79 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-from .config import HostConfig, HostRegistry, load_host_registry, resolve_config_path
+from .database import Database, resolve_database_path
+from .models import Agent, User
 from .qemu import QEMUError, QEMUManager
-from .security import TokenAuth, load_tokens_from_env
-from .ssh import CommandResult, SSHClientFactory, SSHCommandRunner, SSHError
+from .security import APIKeyAuth
+from .ssh import CommandResult, SSHClientFactory, SSHCommandRunner, SSHTarget, SSHError
+
+
+class CreateUserRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: Optional[str] = Field(default=None, max_length=255)
+
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: Optional[str]
+    api_key_prefix: str
+    created_at: datetime
+
+
+class CreateUserResponse(UserResponse):
+    api_key: str
+
+
+class RotateAPIKeyResponse(BaseModel):
+    api_key: str
+    api_key_prefix: str
+
+
+class CreateAgentRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    hostname: str = Field(..., min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(..., min_length=1, max_length=64)
+    private_key: str = Field(..., min_length=40)
+    private_key_passphrase: Optional[str] = Field(default=None, max_length=255)
+    allow_unknown_hosts: bool = False
+    known_hosts_path: Optional[str] = Field(default=None, max_length=1024)
+
+
+class UpdateAgentRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    hostname: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
+    username: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    private_key: Optional[str] = Field(default=None, min_length=40)
+    private_key_passphrase: Optional[str] = Field(default=None, max_length=255)
+    allow_unknown_hosts: Optional[bool] = None
+    known_hosts_path: Optional[str] = Field(default=None, max_length=1024)
+
+
+class AgentResponse(BaseModel):
+    id: int
+    name: str
+    hostname: str
+    port: int
+    username: str
+    allow_unknown_hosts: bool
+    known_hosts_path: Optional[str]
+    created_at: datetime
+
+
+class AgentCredentialsResponse(AgentResponse):
+    private_key: str
+    private_key_passphrase: Optional[str]
 
 
 def command_result_to_dict(result: CommandResult) -> Dict[str, object]:
@@ -32,37 +96,77 @@ def parse_dominfo(stdout: str) -> Dict[str, str]:
     return data
 
 
-def create_app() -> FastAPI:
-    config_path = resolve_config_path(os.getenv("MANAGEMENT_CONFIG_PATH"))
-    registry = load_host_registry(config_path)
-
-    tokens = load_tokens_from_env()
-    try:
-        auth = TokenAuth(tokens)
-    except ValueError as exc:  # pragma: no cover - startup validation
-        raise RuntimeError(
-            "MANAGEMENT_API_TOKENS environment variable must contain at least one token"
-        ) from exc
-
-    app = FastAPI(
-        title="QEMU Management Service",
-        description="Secure API for managing QEMU virtual machines over SSH",
-        version="1.0.0",
+def user_to_response(user: User) -> UserResponse:
+    return UserResponse(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        api_key_prefix=user.api_key_prefix,
+        created_at=user.created_at,
     )
 
-    protected_router = APIRouter(dependencies=[Depends(auth)])
 
-    def get_registry() -> HostRegistry:
-        return registry
+def agent_to_response(agent: Agent) -> AgentResponse:
+    return AgentResponse(
+        id=agent.id,
+        name=agent.name,
+        hostname=agent.hostname,
+        port=agent.port,
+        username=agent.username,
+        allow_unknown_hosts=agent.allow_unknown_hosts,
+        known_hosts_path=agent.known_hosts_path,
+        created_at=agent.created_at,
+    )
 
-    def get_host_config(host_name: str, registry: HostRegistry = Depends(get_registry)) -> HostConfig:
-        try:
-            return registry.get(host_name)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    def get_qemu_manager(host_config: HostConfig = Depends(get_host_config)) -> QEMUManager:
-        factory = SSHClientFactory(host_config)
+def agent_to_credentials(agent: Agent) -> AgentCredentialsResponse:
+    base = agent_to_response(agent)
+    return AgentCredentialsResponse(**base.dict(), private_key=agent.private_key, private_key_passphrase=agent.private_key_passphrase)
+
+
+def agent_to_target(agent: Agent) -> SSHTarget:
+    known_hosts_path: Optional[Path] = None
+    if agent.known_hosts_path:
+        known_hosts_path = Path(agent.known_hosts_path).expanduser().resolve(strict=False)
+    return SSHTarget(
+        hostname=agent.hostname,
+        port=agent.port,
+        username=agent.username,
+        private_key=agent.private_key,
+        passphrase=agent.private_key_passphrase,
+        allow_unknown_hosts=agent.allow_unknown_hosts,
+        known_hosts_path=known_hosts_path,
+    )
+
+
+def create_app() -> FastAPI:
+    db_path = resolve_database_path(os.getenv("MANAGEMENT_DB_PATH"))
+    database = Database(db_path)
+    database.initialize()
+
+    auth = APIKeyAuth(database)
+
+    app = FastAPI(
+        title="PlayrServers QEMU Manager",
+        description="Secure API for managing remote QEMU hypervisors over SSH",
+        version="2.0.0",
+    )
+
+    def get_db() -> Database:
+        return database
+
+    def get_current_user(user: User = Depends(auth)) -> User:
+        return user
+
+    def get_agent(agent_id: int, current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> Agent:
+        agent = db.get_agent_for_user(current_user.id, agent_id)
+        if agent is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        return agent
+
+    def get_qemu_manager(agent: Agent = Depends(get_agent)) -> QEMUManager:
+        target = agent_to_target(agent)
+        factory = SSHClientFactory(target)
         runner = SSHCommandRunner(factory)
         return QEMUManager(runner)
 
@@ -70,49 +174,116 @@ def create_app() -> FastAPI:
     async def healthcheck() -> Dict[str, str]:
         return {"status": "ok"}
 
-    @protected_router.get("/hosts")
-    async def list_hosts(registry: HostRegistry = Depends(get_registry)) -> List[Dict[str, object]]:
-        hosts: List[Dict[str, object]] = []
-        for host in registry.list():
-            hosts.append(
-                {
-                    "name": host.name,
-                    "hostname": host.hostname,
-                    "port": host.port,
-                    "username": host.username,
-                    "allow_unknown_hosts": host.allow_unknown_hosts,
-                }
-            )
-        return hosts
+    @app.post("/users", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)
+    async def create_user(payload: CreateUserRequest, db: Database = Depends(get_db)) -> CreateUserResponse:
+        try:
+            user, api_key = db.create_user(payload.name.strip(), payload.email.strip() if payload.email else None)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        response = user_to_response(user)
+        return CreateUserResponse(**response.dict(), api_key=api_key)
 
-    @protected_router.get("/hosts/{host_name}/vms")
+    @app.get("/users/me", response_model=UserResponse)
+    async def read_current_user(current_user: User = Depends(get_current_user)) -> UserResponse:
+        return user_to_response(current_user)
+
+    @app.post("/users/me/api-key/rotate", response_model=RotateAPIKeyResponse)
+    async def rotate_api_key(current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> RotateAPIKeyResponse:
+        refreshed, api_key = db.rotate_api_key(current_user.id)
+        return RotateAPIKeyResponse(api_key=api_key, api_key_prefix=refreshed.api_key_prefix)
+
+    protected_router = APIRouter()
+
+    @protected_router.get("/agents", response_model=List[AgentResponse])
+    async def list_agents(current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> List[AgentResponse]:
+        agents = db.list_agents_for_user(current_user.id)
+        return [agent_to_response(agent) for agent in agents]
+
+    @protected_router.post("/agents", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+    async def create_agent(
+        payload: CreateAgentRequest,
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> AgentResponse:
+        agent = db.create_agent(
+            current_user.id,
+            name=payload.name.strip(),
+            hostname=payload.hostname.strip(),
+            port=payload.port,
+            username=payload.username.strip(),
+            private_key=payload.private_key,
+            private_key_passphrase=payload.private_key_passphrase,
+            allow_unknown_hosts=payload.allow_unknown_hosts,
+            known_hosts_path=payload.known_hosts_path.strip() if payload.known_hosts_path else None,
+        )
+        return agent_to_response(agent)
+
+    @protected_router.get("/agents/{agent_id}", response_model=AgentResponse)
+    async def read_agent(agent: Agent = Depends(get_agent)) -> AgentResponse:
+        return agent_to_response(agent)
+
+    @protected_router.get("/agents/{agent_id}/credentials", response_model=AgentCredentialsResponse)
+    async def read_agent_credentials(agent: Agent = Depends(get_agent)) -> AgentCredentialsResponse:
+        return agent_to_credentials(agent)
+
+    @protected_router.patch("/agents/{agent_id}", response_model=AgentResponse)
+    async def update_agent(
+        agent_id: int,
+        payload: UpdateAgentRequest,
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> AgentResponse:
+        updates = payload.dict(exclude_unset=True)
+        sanitized: Dict[str, object] = {}
+        for key, value in updates.items():
+            if isinstance(value, str):
+                value = value.strip()
+            if key in {"private_key_passphrase", "known_hosts_path"} and value == "":
+                value = None
+            if value is None and key not in {"private_key_passphrase", "known_hosts_path"}:
+                continue
+            sanitized[key] = value
+        updated = db.update_agent(current_user.id, agent_id, **sanitized)
+        if updated is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        return agent_to_response(updated)
+
+    @protected_router.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_agent(
+        agent_id: int,
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> Response:
+        deleted = db.delete_agent(current_user.id, agent_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @protected_router.get("/agents/{agent_id}/vms")
     async def list_host_vms(manager: QEMUManager = Depends(get_qemu_manager)) -> List[Dict[str, object]]:
-        vms: List[Dict[str, object]] = []
-        for vm in manager.list_vms():
-            vms.append({"name": vm.name, "state": vm.state, "id": vm.id})
-        return vms
+        return [{"name": vm.name, "state": vm.state, "id": vm.id} for vm in manager.list_vms()]
 
-    @protected_router.get("/hosts/{host_name}/vms/{vm_name}")
+    @protected_router.get("/agents/{agent_id}/vms/{vm_name}")
     async def get_vm_info(vm_name: str, manager: QEMUManager = Depends(get_qemu_manager)) -> Dict[str, object]:
         result = manager.get_vm_info(vm_name)
         return {"dominfo": parse_dominfo(result.stdout), "raw": command_result_to_dict(result)}
 
-    @protected_router.post("/hosts/{host_name}/vms/{vm_name}/start")
+    @protected_router.post("/agents/{agent_id}/vms/{vm_name}/start")
     async def start_vm(vm_name: str, manager: QEMUManager = Depends(get_qemu_manager)) -> Dict[str, object]:
         result = manager.start_vm(vm_name)
         return command_result_to_dict(result)
 
-    @protected_router.post("/hosts/{host_name}/vms/{vm_name}/shutdown")
+    @protected_router.post("/agents/{agent_id}/vms/{vm_name}/shutdown")
     async def shutdown_vm(vm_name: str, manager: QEMUManager = Depends(get_qemu_manager)) -> Dict[str, object]:
         result = manager.shutdown_vm(vm_name)
         return command_result_to_dict(result)
 
-    @protected_router.post("/hosts/{host_name}/vms/{vm_name}/force-stop")
+    @protected_router.post("/agents/{agent_id}/vms/{vm_name}/force-stop")
     async def force_stop_vm(vm_name: str, manager: QEMUManager = Depends(get_qemu_manager)) -> Dict[str, object]:
         result = manager.force_stop_vm(vm_name)
         return command_result_to_dict(result)
 
-    @protected_router.post("/hosts/{host_name}/vms/{vm_name}/reboot")
+    @protected_router.post("/agents/{agent_id}/vms/{vm_name}/reboot")
     async def reboot_vm(vm_name: str, manager: QEMUManager = Depends(get_qemu_manager)) -> Dict[str, object]:
         result = manager.reboot_vm(vm_name)
         return command_result_to_dict(result)

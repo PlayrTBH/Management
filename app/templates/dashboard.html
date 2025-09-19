@@ -9,7 +9,8 @@
         <code>{{ api_base_url }}</code>
         <p class="muted" style="margin-top: 0.75rem;">
             Requests from remote agents must target the API host above. Configure your reverse proxy (Cloudflare recommended) to
-            route <code>api.playrservers.com</code> traffic to the `/api` mount of this service.
+            route <code>api.playrservers.com</code> traffic to the dedicated API listener (configured via
+            <code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).
         </p>
     </div>
     <p>Rotate and retrieve your API credentials from the secure key page. The management interface is separate from the

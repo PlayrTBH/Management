@@ -4,7 +4,8 @@ A hardened FastAPI application that exposes both a password-protected operator
 portal and a machine-to-machine API for orchestrating remote QEMU/KVM
 hypervisors. Deploy the management UI at **https://manage.playrservers.com** and
 publish the automation API at **https://api.playrservers.com** (typically by
-proxying the backend's `/api` mount through Cloudflare). Remote hypervisors run
+proxying the backend's dedicated API port through Cloudflare or nginx). Remote
+hypervisors run
 a lightweight agent that authenticates with this application using a
 user-scoped API key issued through the management interface. Each operator owns
 their agents, SSH credentials, and audit history; no sensitive material is
@@ -48,16 +49,20 @@ Environment variables can tweak the installer without editing the script:
 - `APP_REPO` – clone/pull from a Git URL instead of copying the current
   directory.
 - `APP_DIR` – installation directory (default `/opt/manage.playrservers`).
-- `APP_DOMAIN` – nginx server name (default `manage.playrservers.com`).
-- `APP_PORT` – internal uvicorn port (default `8000`).
+- `APP_DOMAIN` – nginx server name for the management UI (default `manage.playrservers.com`).
+- `API_DOMAIN` – nginx server name for the public API (default `api.playrservers.com`).
+- `APP_PORT` – internal management UI port (default `8000`).
+- `APP_API_PORT` – internal API port (default `8001`).
+- `APP_API_HOST` – bind address for the API service (defaults to `APP_HOST`).
 - `INSTALL_NGINX` – set to `0` to skip nginx installation.
 
-After installation the combined service runs as the `manage-playrservers`
-systemd unit and listens on `http://127.0.0.1:8000`. Publish
-`https://manage.playrservers.com` by proxying requests to the root of the
-backend and forward `https://api.playrservers.com` to
-`http://127.0.0.1:8000/api` (Cloudflare page rules or nginx both work). Obtain
-TLS certificates for both hostnames before exposing them to the internet.
+After installation the `manage-playrservers` systemd unit supervises both
+services: the management UI listens on `http://127.0.0.1:8000` and the public
+API listens on `http://127.0.0.1:8001`. Publish
+`https://manage.playrservers.com` by proxying requests to the management port
+and forward `https://api.playrservers.com` to the API port (Cloudflare page
+rules or nginx both work). Obtain TLS certificates for both hostnames before
+exposing them to the internet.
 
 Provision operator accounts from the server; self-registration is disabled:
 
@@ -76,8 +81,10 @@ environment variables:
 | Environment Variable      | Description                                                   | Default                        |
 | ------------------------- | ------------------------------------------------------------- | ------------------------------ |
 | `MANAGEMENT_DB_PATH`      | Custom path to the SQLite database                            | `data/management.sqlite3`      |
-| `MANAGEMENT_HOST`         | Bind address for uvicorn                                      | `0.0.0.0`                      |
-| `MANAGEMENT_PORT`         | Listen port for uvicorn                                       | `8000`                         |
+| `MANAGEMENT_HOST`         | Bind address for the management UI                            | `0.0.0.0`                      |
+| `MANAGEMENT_PORT`         | Listen port for the management UI                             | `8000`                         |
+| `MANAGEMENT_API_HOST`     | Bind address for the API service                              | matches `MANAGEMENT_HOST`      |
+| `MANAGEMENT_API_PORT`     | Listen port for the API service                               | `8001`                         |
 | `MANAGEMENT_WORKERS`      | Number of uvicorn worker processes                            | `1`                            |
 | `MANAGEMENT_RELOAD`       | Set to `true`/`1` to enable auto-reload (development only)    | `false`                        |
 | `MANAGEMENT_PUBLIC_API_URL` | External URL advertised to agents via the portal             | `https://api.playrservers.com` |
@@ -104,9 +111,9 @@ Session cookies are signed with `MANAGEMENT_SESSION_SECRET` and marked
 
 ## API Overview
 
-The automation endpoints live under `/api` on the backend. When publishing
-`https://api.playrservers.com`, route that host to the `/api` mount so public
-requests continue to use simple paths (e.g. `/health`, `/agents`). Every endpoint
+The automation endpoints live on the dedicated API service (default port `8001`).
+When publishing `https://api.playrservers.com`, proxy that host to the API port
+so public requests continue to use simple paths (e.g. `/health`, `/agents`). Every endpoint
 except `/health` requires an API key presented in the `Authorization: Bearer <key>` header.
 
 ### Health
@@ -188,11 +195,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
-MANAGEMENT_RELOAD=true MANAGEMENT_PORT=8000 python main.py
+MANAGEMENT_RELOAD=true python main.py
 ```
 
 Use `scripts/create_user.py` (or import `Database` in a REPL) to create a user
-locally, then target `http://127.0.0.1:8000/api` with the issued API key to
+locally. The management UI is served on `http://127.0.0.1:8000` and the API on
+`http://127.0.0.1:8001`; target the API base with the issued key to
 exercise the endpoints during development. When testing over plain HTTP you can
 set `MANAGEMENT_SESSION_SECURE=false` to allow the browser to retain the login
 session.

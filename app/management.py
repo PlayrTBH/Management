@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from .database import Database
+from .database import Database, resolve_database_path
 from .models import User
 
 
@@ -20,11 +20,19 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 def create_app(
     *,
-    database: Database,
+    database: Optional[Database] = None,
     api_base_url: Optional[str] = None,
     session_secret: Optional[str] = None,
+    initialize_database: bool = False,
 ) -> FastAPI:
     """Create the management web application."""
+
+    if database is None:
+        db_path = resolve_database_path(os.getenv("MANAGEMENT_DB_PATH"))
+        database = Database(db_path)
+        database.initialize()
+    elif initialize_database:
+        database.initialize()
 
     if session_secret is None:
         session_secret = os.getenv("MANAGEMENT_SESSION_SECRET")

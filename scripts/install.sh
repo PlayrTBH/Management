@@ -22,6 +22,23 @@ INSTALL_NGINX="${INSTALL_NGINX:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ENV_FILE="${APP_ENV_FILE:-/etc/manage-playrservers.env}"
 
+DEFAULT_APP_REPO="${DEFAULT_APP_REPO:-https://github.com/PlayrServers/Management.git}"
+
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+PROJECT_ROOT=""
+if [[ -n "$SCRIPT_SOURCE" ]]; then
+    SCRIPT_DIR=$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd -P)
+    PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
+fi
+
+if [[ -z "$APP_REPO" ]]; then
+    if [[ -n "$PROJECT_ROOT" && -d "$PROJECT_ROOT/.git" ]]; then
+        APP_REPO=""
+    else
+        APP_REPO="$DEFAULT_APP_REPO"
+    fi
+fi
+
 APT_PACKAGES=(python3 python3-venv python3-pip git rsync)
 if [[ "$INSTALL_NGINX" == "1" ]]; then
     APT_PACKAGES+=(nginx)
@@ -45,7 +62,10 @@ if [[ -n "$APP_REPO" ]]; then
         git -C "$APP_DIR" pull --ff-only
     fi
 else
-    PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+    if [[ -z "$PROJECT_ROOT" ]]; then
+        echo "Unable to determine project root. Set APP_REPO to a Git URL or run the installer from a repository checkout." >&2
+        exit 1
+    fi
     rsync -a --delete "$PROJECT_ROOT/" "$APP_DIR/" \
         --exclude '.git' \
         --exclude '.venv' \

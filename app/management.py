@@ -1,15 +1,19 @@
 """Browser-based management interface for the PlayrServers control plane."""
 from __future__ import annotations
 
+import json
 import os
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Form, Request, status
+import anyio
+from fastapi import FastAPI, Form, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.websockets import WebSocketState
 
 from .database import Database, resolve_database_path
 from .models import Agent, User
@@ -105,15 +109,32 @@ def create_app(
             "created_at": agent.created_at.isoformat(),
         }
 
-    def _build_ssh_runner(agent: Agent) -> SSHCommandRunner:
-        override = getattr(app.state, "ssh_runner_factory", None)
-        if callable(override):
-            runner = override(agent)
-            if runner is None:
-                raise RuntimeError("SSH runner override must return a runner instance")
-            return runner
+    def _fetch_user(user_id: object) -> Optional[User]:
+        try:
+            numeric_id = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        return database.get_user(numeric_id)
 
-        target = SSHTarget(
+    def _get_current_user(request: Request) -> Optional[User]:
+        user_id = request.session.get("user_id")
+        if not user_id:
+            return None
+        user = _fetch_user(user_id)
+        if user is None:
+            request.session.pop("user_id", None)
+        return user
+
+    def _get_current_user_from_session(session) -> Optional[User]:
+        if not isinstance(session, dict):
+            return None
+        user_id = session.get("user_id")
+        if not user_id:
+            return None
+        return _fetch_user(user_id)
+
+    def _build_target(agent: Agent) -> SSHTarget:
+        return SSHTarget(
             hostname=agent.hostname,
             port=agent.port,
             username=agent.username,
@@ -122,8 +143,30 @@ def create_app(
             allow_unknown_hosts=agent.allow_unknown_hosts,
             known_hosts_path=Path(agent.known_hosts_path).expanduser() if agent.known_hosts_path else None,
         )
+
+    def _build_ssh_runner(agent: Agent) -> SSHCommandRunner:
+        override = getattr(app.state, "ssh_runner_factory", None)
+        if callable(override):
+            runner = override(agent)
+            if runner is None:
+                raise RuntimeError("SSH runner override must return a runner instance")
+            return runner
+
+        target = _build_target(agent)
         factory = SSHClientFactory(target)
         return SSHCommandRunner(factory)
+
+    def _build_ssh_terminal(agent: Agent):
+        override = getattr(app.state, "ssh_terminal_factory", None)
+        if callable(override):
+            terminal = override(agent)
+            if terminal is None:
+                raise RuntimeError("SSH terminal override must return a context manager")
+            return terminal
+
+        target = _build_target(agent)
+        factory = SSHClientFactory(target)
+        return factory.open_shell()
 
     def _build_qemu_manager(agent: Agent) -> QEMUManager:
         runner = _build_ssh_runner(agent)
@@ -222,15 +265,6 @@ def create_app(
             request.url_for("account"),
             status_code=status.HTTP_303_SEE_OTHER,
         )
-
-    def _get_current_user(request: Request) -> Optional[User]:
-        user_id = request.session.get("user_id")
-        if not user_id:
-            return None
-        user = database.get_user(int(user_id))
-        if user is None:
-            request.session.pop("user_id", None)
-        return user
 
     def _redirect_to_login(request: Request) -> RedirectResponse:
         return RedirectResponse(
@@ -463,6 +497,9 @@ def create_app(
             "host_info": str(
                 request.url_for("management_host_info", agent_id=0)
             ),
+            "ssh_terminal": str(
+                request.url_for("management_agent_terminal", agent_id=0)
+            ),
         }
 
         return templates.TemplateResponse(
@@ -583,6 +620,99 @@ def create_app(
             content={"status": "error", "message": "Hypervisor not found."},
         )
 
+    async def _send_websocket_json(websocket: WebSocket, payload: Dict[str, object]) -> None:
+        if websocket.client_state == WebSocketState.DISCONNECTED:
+            return
+        with suppress(Exception):
+            await websocket.send_json(payload)
+
+    async def _stream_ssh_channel(websocket: WebSocket, channel) -> None:
+        cancel_exc = anyio.get_cancelled_exc_class()
+
+        async def pump_ssh_to_websocket(task_group) -> None:
+            try:
+                while True:
+                    data = await anyio.to_thread.run_sync(
+                        channel.recv,
+                        4096,
+                        abandon_on_cancel=True,
+                    )
+                    if not data:
+                        break
+                    try:
+                        await websocket.send_bytes(data)
+                    except Exception:
+                        break
+            except cancel_exc:
+                pass
+            except Exception:
+                pass
+            finally:
+                task_group.cancel_scope.cancel()
+                with suppress(Exception):
+                    await anyio.to_thread.run_sync(channel.close)
+                with suppress(Exception):
+                    if websocket.application_state != WebSocketState.DISCONNECTED:
+                        await websocket.close()
+
+        async def pump_websocket_to_ssh(task_group) -> None:
+            try:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        break
+                    data = message.get("bytes")
+                    if data is not None:
+                        if data:
+                            with suppress(Exception):
+                                await anyio.to_thread.run_sync(channel.send, data)
+                        continue
+                    text = message.get("text")
+                    if text is None:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        encoded = text.encode("utf-8", errors="ignore")
+                        if encoded:
+                            with suppress(Exception):
+                                await anyio.to_thread.run_sync(channel.send, encoded)
+                        continue
+                    message_type = payload.get("type")
+                    if message_type == "resize":
+                        cols = payload.get("cols")
+                        rows = payload.get("rows")
+                        try:
+                            width = int(cols) if cols else 0
+                        except (TypeError, ValueError):
+                            width = 0
+                        try:
+                            height = int(rows) if rows else 0
+                        except (TypeError, ValueError):
+                            height = 0
+                        width = width if width > 0 else 80
+                        height = height if height > 0 else 24
+                        with suppress(Exception):
+                            await anyio.to_thread.run_sync(channel.resize_pty, width, height)
+                        continue
+                    if message_type == "close":
+                        break
+            except (WebSocketDisconnect, cancel_exc):
+                pass
+            except Exception:
+                pass
+            finally:
+                task_group.cancel_scope.cancel()
+                with suppress(Exception):
+                    await anyio.to_thread.run_sync(channel.close)
+                with suppress(Exception):
+                    if websocket.application_state != WebSocketState.DISCONNECTED:
+                        await websocket.close()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(pump_ssh_to_websocket, task_group)
+            task_group.start_soon(pump_websocket_to_ssh, task_group)
+
     @app.get("/management/agents/{agent_id}/vms")
     async def management_list_vms(request: Request, agent_id: int):
         user = _get_current_user(request)
@@ -678,6 +808,42 @@ def create_app(
                 "result": _command_result_payload(result),
             }
         )
+
+    @app.websocket("/management/agents/{agent_id}/terminal", name="management_agent_terminal")
+    async def management_agent_terminal(websocket: WebSocket, agent_id: int):
+        user = _get_current_user_from_session(websocket.session)
+        if user is None:
+            await websocket.close(code=4401)
+            return
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+
+        try:
+            with _build_ssh_terminal(agent) as channel:
+                await _send_websocket_json(
+                    websocket,
+                    {"type": "status", "status": "connected"},
+                )
+                await _stream_ssh_channel(websocket, channel)
+        except (SSHError, RuntimeError) as exc:
+            await _send_websocket_json(websocket, {"type": "error", "message": str(exc)})
+        except Exception:
+            await _send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": "SSH session terminated unexpectedly.",
+                },
+            )
+        finally:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                with suppress(Exception):
+                    await websocket.close()
 
     @app.get("/management/agents/{agent_id}/host-info")
     async def management_host_info(request: Request, agent_id: int):

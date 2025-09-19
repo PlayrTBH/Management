@@ -109,10 +109,48 @@ class SSHClientFactory:
             yield client
         except paramiko.AuthenticationException as exc:
             raise SSHError("Authentication with the remote host failed") from exc
+        except paramiko.BadHostKeyException as exc:
+            message = (
+                "Host key verification failed for "
+                f"{exc.hostname}."
+            )
+            raise SSHError(message) from exc
         except paramiko.SSHException as exc:
-            raise SSHError(f"SSH connection failed: {exc}") from exc
+            message = str(exc)
+            if "not found in known_hosts" in message:
+                host = self._target.hostname
+                suggestion = (
+                    "Host key verification failed for {host}. "
+                    "Add the host to the configured known hosts file or enable "
+                    '"Allow unknown host keys" for this hypervisor.'
+                )
+                raise SSHError(suggestion.format(host=host)) from exc
+            raise SSHError(f"SSH connection failed: {message}") from exc
         finally:
             client.close()
+
+    @contextmanager
+    def open_shell(
+        self,
+        *,
+        term: str = "xterm-256color",
+        width: int = 80,
+        height: int = 24,
+    ) -> Generator[paramiko.Channel, None, None]:
+        """Open an interactive shell channel on the remote host."""
+
+        with self.connect() as client:
+            try:
+                channel = client.invoke_shell(term=term, width=width, height=height)
+            except paramiko.SSHException as exc:
+                raise SSHError(f"Failed to open an interactive shell: {exc}") from exc
+            try:
+                yield channel
+            finally:
+                try:
+                    channel.close()
+                except Exception:  # pragma: no cover - best effort shutdown
+                    pass
 
 
 class SSHCommandRunner:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import secrets
@@ -10,7 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from passlib.context import CryptContext
+try:  # pragma: no cover - exercised indirectly via tests
+    from passlib.context import CryptContext
+except ModuleNotFoundError:  # pragma: no cover - explicitly tested below
+    CryptContext = None  # type: ignore[assignment]
 
 from .models import Agent, User
 
@@ -48,14 +52,47 @@ def _hash_api_key(api_key: str, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", api_key.encode("utf-8"), salt, 600_000)
 
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto") if CryptContext else None
+
+_PBKDF2_SCHEME = "pbkdf2_sha256"
+_PBKDF2_ROUNDS = 600_000
+_PBKDF2_SALT_BYTES = 16
+
+
+def _hash_password_pbkdf2(password: str) -> str:
+    salt = secrets.token_bytes(_PBKDF2_SALT_BYTES)
+    hash_bytes = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ROUNDS)
+    encoded_salt = base64.b64encode(salt).decode("ascii")
+    encoded_hash = base64.b64encode(hash_bytes).decode("ascii")
+    return f"{_PBKDF2_SCHEME}${_PBKDF2_ROUNDS}${encoded_salt}${encoded_hash}"
+
+
+def _verify_password_pbkdf2(password: str, hashed: str) -> bool:
+    try:
+        _, rounds_text, salt_b64, hash_b64 = hashed.split("$", 3)
+        rounds = int(rounds_text)
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+    except (ValueError, TypeError, binascii.Error):
+        return False
+
+    calculated = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
+    return hmac.compare_digest(expected, calculated)
 
 
 def _hash_password(password: str) -> str:
-    return _pwd_context.hash(password)
+    if _pwd_context is not None:
+        return _pwd_context.hash(password)
+    return _hash_password_pbkdf2(password)
 
 
 def _verify_password(password: str, hashed: str) -> bool:
+    if hashed.startswith(f"{_PBKDF2_SCHEME}$"):
+        return _verify_password_pbkdf2(password, hashed)
+
+    if _pwd_context is None:
+        return False
+
     try:
         return _pwd_context.verify(password, hashed)
     except ValueError:

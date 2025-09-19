@@ -1,0 +1,95 @@
+{% extends "layout.html" %}
+{% block title %}Account · PlayrServers Control Plane{% endblock %}
+{% block content %}
+<div class="stack">
+    <div class="card">
+        <h1>Account management</h1>
+        <p class="muted">Update your operator profile, rotate credentials, and keep your login password aligned with PlayrServers security policies.</p>
+        {% if messages %}
+            {% for item in messages %}
+                {% set category = item.category if item.category is defined else 'info' %}
+                <div class="notice{% if category == 'error' %} danger{% elif category == 'success' %} success{% endif %}">{{ item.message }}</div>
+            {% endfor %}
+        {% endif %}
+        <div class="grid-2">
+            <section>
+                <h2>Profile details</h2>
+                <form method="post" action="{{ request.url_for('update_profile') }}">
+                    <div class="field">
+                        <label for="name">Display name</label>
+                        <input type="text" id="name" name="name" value="{{ user.name }}" required>
+                    </div>
+                    <div class="field">
+                        <label for="email">Email address</label>
+                        <input type="email" id="email" name="email" value="{{ user.email or '' }}" placeholder="you@example.com">
+                        <p class="help-text">Used for sign-in notifications. Leave blank to detach an email address.</p>
+                    </div>
+                    <button type="submit" class="button">Save changes</button>
+                </form>
+            </section>
+            <section>
+                <h2>Password</h2>
+                <form method="post" action="{{ request.url_for('change_password') }}">
+                    <div class="field">
+                        <label for="current_password">Current password</label>
+                        <input type="password" id="current_password" name="current_password" required autocomplete="current-password">
+                    </div>
+                    <div class="field">
+                        <label for="new_password">New password</label>
+                        <input type="password" id="new_password" name="new_password" required autocomplete="new-password" minlength="{{ password_min_length }}">
+                        <p class="help-text">Minimum {{ password_min_length }} characters. Choose a phrase unique to this control plane.</p>
+                    </div>
+                    <div class="field">
+                        <label for="confirm_password">Confirm new password</label>
+                        <input type="password" id="confirm_password" name="confirm_password" required autocomplete="new-password">
+                    </div>
+                    <button type="submit" class="button secondary">Update password</button>
+                </form>
+            </section>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
+            <h2>Automation API key</h2>
+            <span class="badge">Prefix: {{ user.api_key_prefix }}</span>
+        </div>
+        <p class="muted">Remote agents authenticate with this key when calling <code>{{ api_base_url }}</code>. Rotate immediately if you suspect a compromise.</p>
+        <div class="notice">
+            <p><strong>API endpoint:</strong> <code>{{ api_base_url }}</code></p>
+            {% if generated_api_key %}
+                <p><strong>New API key:</strong></p>
+                <pre><code>{{ generated_api_key }}</code></pre>
+                <p class="help-text">Copy the token now—this is the only time it will be displayed.</p>
+            {% else %}
+                <p><strong>Current key prefix:</strong> <code>{{ user.api_key_prefix }}</code></p>
+            {% endif %}
+        </div>
+        <form method="post" action="{{ request.url_for('rotate_api_key') }}">
+            <button type="submit" class="button danger">Rotate API key</button>
+        </form>
+        <p style="margin-top: 1.5rem;">Provision the remote agent environment file on your hypervisor:</p>
+<pre><code>sudo install -d -m 700 /etc/playrservers
+sudo tee /etc/playrservers/agent.env &gt; /dev/null &lt;&lt;'CONFIG'
+API_BASE_URL={{ api_base_url }}
+API_KEY={{ generated_api_key or '&lt;your-api-key&gt;' }}
+CONFIG
+sudo chmod 600 /etc/playrservers/agent.env
+</code></pre>
+        <p>With the agent configured, enroll the host via cURL:</p>
+<pre><code>source /etc/playrservers/agent.env
+curl -X POST "$API_BASE_URL/agents" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "hypervisor-01",
+        "hostname": "203.0.113.42",
+        "port": 22,
+        "username": "qemu-admin",
+        "private_key": "$(cat /etc/playrservers/ssh/id_ed25519)"
+      }'
+</code></pre>
+        <p class="muted">Route <code>{{ api_base_url }}</code> through your reverse proxy (Cloudflare or nginx) to the dedicated API listener (<code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).</p>
+    </div>
+</div>
+{% endblock %}

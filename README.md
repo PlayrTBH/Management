@@ -33,17 +33,19 @@ shared across accounts.
 
 Run the installer with a **single command** on a fresh Ubuntu 24.04 server. The
 script installs system dependencies, provisions a Python virtual environment,
-creates a systemd service, and (optionally) configures nginx as a reverse
-proxy for `manage.playrservers.com`.
+creates a systemd service, and (optionally) configures nginx as a reverse proxy
+for `manage.playrservers.com`. The CLI emits colorised status banners so you
+can track progress at a glance.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PlayrServers/Management/main/scripts/install.sh | sudo bash
+```
+
+Already have a clone checked out? Run the same installer locally:
 
 ```bash
 sudo ./scripts/install.sh
 ```
-
-> 💡 Because this repository is public you can bootstrap the installer without
-> cloning first:
-> `curl -fsSL https://raw.githubusercontent.com/PlayrServers/Management/main/scripts/install.sh | sudo bash`
-> (set `APP_REPO` or `DEFAULT_APP_REPO` to point at a fork if desired).
 
 Environment variables can tweak the installer without editing the script:
 
@@ -102,12 +104,16 @@ The systemd unit installed by `scripts/install.sh` sources `/etc/manage-playrser
 Navigate to `https://manage.playrservers.com` (or whichever hostname you proxy
 to the root of the service) to access the operator portal. Accounts are created
 with `scripts/create_user.py` and authenticate with an email + password. The UI
-exposes two primary workflows:
+exposes three primary workflows:
 
 - **Dashboard** – high-level overview of the deployment, including the API base
   URL that remote agents should target through Cloudflare or nginx.
-- **API key** – rotate and retrieve the user's API key, with copy/paste snippets
-  for bootstrapping the remote agent and installing SSH keys on the virtualization host.
+- **Account &amp; API key** – update profile information, rotate credentials, and
+  copy onboarding snippets for the remote agent.
+- **Hypervisor management** – register virtualization hosts, inspect their
+  virtual machines, dispatch lifecycle commands, and launch SSH sessions with
+  the stored credentials. A deployment guide placeholder highlights where the
+  remote agent documentation will live.
 
 Session cookies are signed with `MANAGEMENT_SESSION_SECRET` and marked
 `Secure`/`SameSite=Lax` so they are only transmitted over HTTPS.

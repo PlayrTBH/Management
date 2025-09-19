@@ -6,10 +6,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from .agent_registration import (
+    AgentProvisioningError,
+    AgentProvisioningSettings,
+    load_agent_provisioning_settings,
+    load_authorized_keys,
+    load_private_key,
+)
 from .database import Database, resolve_database_path
 from .models import Agent, User
 from .qemu import QEMUError, QEMUManager
@@ -66,6 +73,42 @@ class AgentResponse(BaseModel):
 class AgentCredentialsResponse(AgentResponse):
     private_key: str
     private_key_passphrase: Optional[str]
+
+
+class AgentConnectRequest(BaseModel):
+    hostname: Optional[str] = Field(default=None, max_length=255)
+    ip_address: Optional[str] = Field(default=None, max_length=255)
+    metadata: Dict[str, object] = Field(default_factory=dict)
+
+    class Config:
+        extra = "allow"
+
+    @staticmethod
+    def _normalize(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    def resolved_hostname(self) -> Optional[str]:
+        for candidate in (self.ip_address, self.hostname):
+            normalized = self._normalize(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    def resolved_name(self) -> Optional[str]:
+        return self._normalize(self.hostname) or self.resolved_hostname()
+
+
+class AgentConnectResponse(BaseModel):
+    agent_id: int
+    name: str
+    hostname: str
+    port: int
+    username: str
+    authorized_keys: List[str]
+    close_other_sessions: bool
 
 
 def command_result_to_dict(result: CommandResult) -> Dict[str, object]:
@@ -135,6 +178,7 @@ def create_app(
     database: Database | None = None,
     auth: APIKeyAuth | None = None,
     initialize_database: bool = False,
+    agent_settings: AgentProvisioningSettings | None = None,
 ) -> FastAPI:
     if database is None:
         db_path = resolve_database_path(os.getenv("MANAGEMENT_DB_PATH"))
@@ -146,6 +190,9 @@ def create_app(
     if auth is None:
         auth = APIKeyAuth(database)
 
+    if agent_settings is None:
+        agent_settings = load_agent_provisioning_settings()
+
     app = FastAPI(
         title="PlayrServers QEMU Manager",
         description="Secure API for managing remote QEMU hypervisors over SSH",
@@ -155,8 +202,8 @@ def create_app(
     def get_db() -> Database:
         return database
 
-    def get_current_user(user: User = Depends(auth)) -> User:
-        return user
+    async def get_current_user(request: Request) -> User:
+        return await auth(request)
 
     def get_agent(agent_id: int, current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> Agent:
         agent = db.get_agent_for_user(current_user.id, agent_id)
@@ -216,6 +263,88 @@ def create_app(
     @protected_router.get("/agents/{agent_id}/credentials", response_model=AgentCredentialsResponse)
     async def read_agent_credentials(agent: Agent = Depends(get_agent)) -> AgentCredentialsResponse:
         return agent_to_credentials(agent)
+
+    @protected_router.post("/v1/servers/connect", response_model=AgentConnectResponse)
+    async def register_server(
+        payload: AgentConnectRequest,
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> AgentConnectResponse:
+        hostname = payload.resolved_hostname()
+        if not hostname:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Request must include a hostname or ip_address",
+            )
+
+        name = payload.resolved_name()
+        if name is None:
+            name = hostname
+
+        try:
+            private_key = load_private_key(agent_settings)
+            authorized_keys = load_authorized_keys(agent_settings)
+        except AgentProvisioningError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+        existing = db.find_agent_by_hostname(current_user.id, hostname)
+        if existing is None and name:
+            existing = db.find_agent_by_name(current_user.id, name)
+        desired_known_hosts = agent_settings.known_hosts_as_string()
+
+        if existing is None:
+            agent = db.create_agent(
+                current_user.id,
+                name=name,
+                hostname=hostname,
+                port=agent_settings.port,
+                username=agent_settings.username,
+                private_key=private_key,
+                private_key_passphrase=None,
+                allow_unknown_hosts=agent_settings.allow_unknown_hosts,
+                known_hosts_path=desired_known_hosts,
+            )
+        else:
+            updates: Dict[str, object] = {}
+            if existing.name != name:
+                updates["name"] = name
+            if existing.hostname != hostname:
+                updates["hostname"] = hostname
+            if existing.port != agent_settings.port:
+                updates["port"] = agent_settings.port
+            if existing.username != agent_settings.username:
+                updates["username"] = agent_settings.username
+            if existing.private_key != private_key:
+                updates["private_key"] = private_key
+            if existing.private_key_passphrase is not None:
+                updates["private_key_passphrase"] = None
+            if existing.allow_unknown_hosts != agent_settings.allow_unknown_hosts:
+                updates["allow_unknown_hosts"] = agent_settings.allow_unknown_hosts
+            if existing.known_hosts_path != desired_known_hosts:
+                updates["known_hosts_path"] = desired_known_hosts
+
+            if updates:
+                agent = db.update_agent(current_user.id, existing.id, **updates)
+                if agent is None:  # pragma: no cover - defensive guard
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to update agent during registration",
+                    )
+            else:
+                agent = existing
+
+        return AgentConnectResponse(
+            agent_id=agent.id,
+            name=agent.name,
+            hostname=agent.hostname,
+            port=agent.port,
+            username=agent.username,
+            authorized_keys=authorized_keys,
+            close_other_sessions=agent_settings.close_other_sessions,
+        )
 
     @protected_router.patch("/agents/{agent_id}", response_model=AgentResponse)
     async def update_agent(

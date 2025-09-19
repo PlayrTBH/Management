@@ -1,0 +1,401 @@
+{% extends "layout.html" %}
+{% block title %}Management · PlayrServers Control Plane{% endblock %}
+{% block content %}
+<div class="stack">
+    <div class="card">
+        <h1>Hypervisor fleet management</h1>
+        <p class="muted">Register remote virtualization hosts, audit their metadata, and keep SSH credentials synchronized with the automation API.</p>
+        {% if messages %}
+            {% for item in messages %}
+                {% set category = item.category if item.category is defined else 'info' %}
+                <div class="notice{% if category == 'error' %} danger{% elif category == 'success' %} success{% endif %}">{{ item.message }}</div>
+            {% endfor %}
+        {% endif %}
+        <div class="management-grid">
+            <section>
+                <h2>Registered hypervisors</h2>
+                <div class="agent-list" id="agent-list">
+                    {% if agents %}
+                        {% for agent in agents %}
+                            <div class="agent-entry" data-agent-id="{{ agent.id }}">
+                                <button type="button" class="agent-tile{% if selected_agent and agent.id == selected_agent.id %} active{% endif %}" data-agent='{{ agent | tojson }}'>
+                                    <strong>{{ agent.name }}</strong>
+                                    <div class="agent-meta">
+                                        <span>{{ agent.hostname }}:{{ agent.port }}</span>
+                                        <span>SSH · {{ agent.username }}</span>
+                                    </div>
+                                </button>
+                                <div class="agent-actions">
+                                    <span class="muted">Created {{ agent.created_at }}</span>
+                                    <form method="post" action="{{ agent.remove_url }}" onsubmit="return confirm('Remove {{ agent.name }}?');">
+                                        <button type="submit" class="text-button">Remove</button>
+                                    </form>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <p class="muted">No hypervisors registered yet. Use the form to onboard your first agent.</p>
+                    {% endif %}
+                </div>
+            </section>
+            <section>
+                <h2>Add hypervisor</h2>
+                <form method="post" action="{{ request.url_for('register_agent') }}">
+                    <div class="field">
+                        <label for="agent-name">Name</label>
+                        <input type="text" id="agent-name" name="name" required placeholder="hypervisor-01">
+                    </div>
+                    <div class="field">
+                        <label for="agent-hostname">Hostname / IP</label>
+                        <input type="text" id="agent-hostname" name="hostname" required placeholder="203.0.113.42">
+                    </div>
+                    <div class="field">
+                        <label for="agent-port">SSH port</label>
+                        <input type="number" id="agent-port" name="port" value="22" min="1" max="65535" required>
+                    </div>
+                    <div class="field">
+                        <label for="agent-username">SSH username</label>
+                        <input type="text" id="agent-username" name="username" required placeholder="qemu-admin">
+                    </div>
+                    <div class="field">
+                        <label for="agent-key">Private key</label>
+                        <textarea id="agent-key" name="private_key" required placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+                    </div>
+                    <div class="field">
+                        <label for="agent-passphrase">Private key passphrase <span class="muted">(optional)</span></label>
+                        <input type="password" id="agent-passphrase" name="private_key_passphrase" autocomplete="off">
+                    </div>
+                    <div class="field">
+                        <label for="agent-known-hosts">Known hosts path <span class="muted">(optional)</span></label>
+                        <input type="text" id="agent-known-hosts" name="known_hosts_path" placeholder="~/.ssh/known_hosts">
+                    </div>
+                    <div class="field" style="flex-direction: row; align-items: center; gap: 0.75rem;">
+                        <input type="checkbox" id="agent-allow-unknown" name="allow_unknown_hosts" value="1">
+                        <label for="agent-allow-unknown">Allow unknown host keys</label>
+                    </div>
+                    <p class="help-text">Upload a dedicated automation key. The control plane stores the private key encrypted at rest.</p>
+                    <button type="submit" class="button">Register hypervisor</button>
+                </form>
+            </section>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
+            <h2>Virtual machine inventory</h2>
+            <span class="badge" id="selected-agent-label">{% if selected_agent %}{{ selected_agent.name }}{% else %}No agent selected{% endif %}</span>
+        </div>
+        <div id="vm-status" class="muted">
+            {% if not agents %}
+                Register a hypervisor to view its virtual machines.
+            {% elif not selected_agent %}
+                Select a hypervisor to load its virtual machines.
+            {% else %}
+                Loading virtual machines…
+            {% endif %}
+        </div>
+        <div class="table-wrapper" id="vm-table-wrapper"{% if not selected_agent %} style="display: none;"{% endif %}>
+            <table id="vm-table">
+                <thead>
+                    <tr>
+                        <th scope="col">Name</th>
+                        <th scope="col">State</th>
+                        <th scope="col">Actions</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
+            <h2>Direct SSH console</h2>
+            <span class="badge warning">Operator access</span>
+        </div>
+        <div id="ssh-placeholder" class="placeholder-box"{% if selected_agent %} style="display: none;"{% endif %}>
+            Select a hypervisor to populate SSH connection details.
+        </div>
+        <div id="ssh-section"{% if not selected_agent %} style="display: none;"{% endif %}>
+            <p class="muted">Launch an SSH session to the selected hypervisor or copy the ready-to-run command.</p>
+            <div class="ssh-launch">
+                <a id="ssh-link" class="button secondary" target="_blank" rel="noreferrer noopener" href="#">Open SSH session</a>
+                <code id="ssh-command"></code>
+            </div>
+            <p class="help-text">Most desktop environments will hand the SSH URI off to your preferred terminal client.</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Remote agent deployment</h2>
+        <div class="placeholder-box">
+            <p>Guidance on locating and installing the PlayrServers remote agent will appear here. Include package repository locations, service management commands, and upgrade advice once distribution details are finalized.</p>
+        </div>
+    </div>
+</div>
+
+<script id="agent-data" type="application/json">{{ agents | tojson }}</script>
+<script id="selected-agent" type="application/json">{{ selected_agent | tojson if selected_agent else 'null' }}</script>
+<script id="management-endpoints" type="application/json">{{ endpoints | tojson }}</script>
+<script>
+(() => {
+    const agentDataElement = document.getElementById('agent-data');
+    const selectedAgentElement = document.getElementById('selected-agent');
+    const endpointsElement = document.getElementById('management-endpoints');
+
+    if (!agentDataElement || !selectedAgentElement || !endpointsElement) {
+        return;
+    }
+
+    const state = {
+        agents: JSON.parse(agentDataElement.textContent || '[]'),
+        selectedAgent: JSON.parse(selectedAgentElement.textContent || 'null'),
+        endpoints: JSON.parse(endpointsElement.textContent || '{}'),
+    };
+
+    if (!state.endpoints || !state.endpoints.list_vms) {
+        return;
+    }
+
+    const agentList = document.getElementById('agent-list');
+    const vmStatus = document.getElementById('vm-status');
+    const vmTableWrapper = document.getElementById('vm-table-wrapper');
+    const vmTableBody = document.querySelector('#vm-table tbody');
+    const agentLabel = document.getElementById('selected-agent-label');
+    const sshLink = document.getElementById('ssh-link');
+    const sshCommand = document.getElementById('ssh-command');
+    const sshSection = document.getElementById('ssh-section');
+    const sshPlaceholder = document.getElementById('ssh-placeholder');
+
+    function buildUrl(template, agentId, vmName, action) {
+        let url = template.replace('/0/', '/' + agentId + '/');
+        if (vmName !== undefined) {
+            url = url.replace('__VM__', encodeURIComponent(vmName));
+        }
+        if (action !== undefined) {
+            url = url.replace('__ACTION__', action);
+        }
+        return url;
+    }
+
+    function renderAgents() {
+        if (!agentList) {
+            return;
+        }
+        agentList.innerHTML = '';
+        if (!state.agents.length) {
+            const empty = document.createElement('p');
+            empty.className = 'muted';
+            empty.textContent = 'No hypervisors registered yet. Use the form to onboard your first agent.';
+            agentList.appendChild(empty);
+            return;
+        }
+        state.agents.forEach((agent) => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'agent-entry';
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'agent-tile' + (state.selectedAgent && state.selectedAgent.id === agent.id ? ' active' : '');
+            button.dataset.agentId = String(agent.id);
+            button.innerHTML = `<strong>${agent.name}</strong>
+                <div class="agent-meta">
+                    <span>${agent.hostname}:${agent.port}</span>
+                    <span>SSH · ${agent.username}</span>
+                </div>`;
+            button.addEventListener('click', () => {
+                selectAgent(agent);
+            });
+            wrapper.appendChild(button);
+
+            const actions = document.createElement('div');
+            actions.className = 'agent-actions';
+            const created = document.createElement('span');
+            created.className = 'muted';
+            try {
+                created.textContent = `Created ${new Date(agent.created_at).toLocaleString()}`;
+            } catch (_) {
+                created.textContent = 'Created recently';
+            }
+            actions.appendChild(created);
+
+            const form = document.createElement('form');
+            form.method = 'post';
+            form.action = agent.remove_url;
+            form.innerHTML = '<button type="submit" class="text-button">Remove</button>';
+            form.addEventListener('submit', (event) => {
+                if (!confirm(`Remove ${agent.name}?`)) {
+                    event.preventDefault();
+                }
+            });
+            actions.appendChild(form);
+            wrapper.appendChild(actions);
+
+            agentList.appendChild(wrapper);
+        });
+    }
+
+    function updateSshSection(agent) {
+        if (!sshLink || !sshCommand || !sshSection || !sshPlaceholder) {
+            return;
+        }
+        if (!agent) {
+            sshSection.style.display = 'none';
+            sshPlaceholder.style.display = '';
+            sshCommand.textContent = '';
+            sshLink.href = '#';
+            return;
+        }
+        const sshUri = `ssh://${encodeURIComponent(agent.username)}@${agent.hostname}:${agent.port}`;
+        const command = agent.port === 22
+            ? `ssh ${agent.username}@${agent.hostname}`
+            : `ssh -p ${agent.port} ${agent.username}@${agent.hostname}`;
+        sshLink.href = sshUri;
+        sshCommand.textContent = command;
+        sshSection.style.display = '';
+        sshPlaceholder.style.display = 'none';
+    }
+
+    function updateAgentLabel(agent) {
+        if (agentLabel) {
+            agentLabel.textContent = agent ? agent.name : 'No agent selected';
+        }
+    }
+
+    function setVmStatus(message, isError = false) {
+        if (!vmStatus) {
+            return;
+        }
+        vmStatus.textContent = message;
+        vmStatus.classList.toggle('danger', isError);
+    }
+
+    function renderVmTable(vms) {
+        if (!vmTableBody || !vmTableWrapper) {
+            return;
+        }
+        vmTableBody.innerHTML = '';
+        if (!vms.length) {
+            setVmStatus('No virtual machines reported by the selected hypervisor.');
+            vmTableWrapper.style.display = 'none';
+            return;
+        }
+        vmTableWrapper.style.display = '';
+        vms.forEach((vm) => {
+            const row = document.createElement('tr');
+            const nameCell = document.createElement('td');
+            nameCell.textContent = vm.name;
+            row.appendChild(nameCell);
+
+            const stateCell = document.createElement('td');
+            const normalizedState = (vm.state || '').toLowerCase();
+            const dot = document.createElement('span');
+            let stateClass = 'status-other';
+            if (normalizedState.includes('running')) {
+                stateClass = 'status-running';
+            } else if (normalizedState.includes('shut') || normalizedState.includes('off')) {
+                stateClass = 'status-shutoff';
+            } else if (normalizedState.includes('pause')) {
+                stateClass = 'status-paused';
+            }
+            dot.className = 'status-dot ' + stateClass;
+            const label = document.createElement('span');
+            label.appendChild(dot);
+            label.append(vm.state);
+            stateCell.appendChild(label);
+            row.appendChild(stateCell);
+
+            const actionsCell = document.createElement('td');
+            actionsCell.className = 'vm-actions';
+
+            const makeActionButton = (label, action, variant) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'button small' + (variant ? ' ' + variant : '');
+                button.textContent = label;
+                button.addEventListener('click', () => triggerVmAction(vm.name, action));
+                return button;
+            };
+
+            actionsCell.appendChild(makeActionButton('Start', 'start'));
+            actionsCell.appendChild(makeActionButton('Shutdown', 'shutdown'));
+            actionsCell.appendChild(makeActionButton('Force stop', 'force-stop', 'danger'));
+            actionsCell.appendChild(makeActionButton('Reboot', 'reboot'));
+            row.appendChild(actionsCell);
+
+            vmTableBody.appendChild(row);
+        });
+    }
+
+    async function fetchVms(agent) {
+        if (!agent) {
+            if (vmTableBody) {
+                vmTableBody.innerHTML = '';
+            }
+            if (vmTableWrapper) {
+                vmTableWrapper.style.display = 'none';
+            }
+            setVmStatus('Select a hypervisor to load its virtual machines.');
+            return;
+        }
+        setVmStatus('Querying virtual machines from ' + agent.name + '…');
+        try {
+            const url = buildUrl(state.endpoints.list_vms, agent.id);
+            const response = await fetch(url, { credentials: 'same-origin' });
+            const payload = await response.json();
+            if (payload.status !== 'ok') {
+                throw new Error(payload.message || 'Unable to list virtual machines.');
+            }
+            renderVmTable(payload.vms || []);
+            if ((payload.vms || []).length) {
+                setVmStatus(`${payload.vms.length} virtual machine(s) reported by ${agent.name}.`);
+            }
+        } catch (error) {
+            if (vmTableWrapper) {
+                vmTableWrapper.style.display = 'none';
+            }
+            setVmStatus(error.message || 'Failed to query virtual machines.', true);
+        }
+    }
+
+    async function triggerVmAction(vmName, action) {
+        const agent = state.selectedAgent;
+        if (!agent) {
+            return;
+        }
+        setVmStatus(`Dispatching ${action} for ${vmName}…`);
+        try {
+            const url = buildUrl(state.endpoints.vm_action, agent.id, vmName, action);
+            const response = await fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+            });
+            const payload = await response.json();
+            if (payload.status !== 'ok') {
+                throw new Error(payload.message || 'Operation failed.');
+            }
+            setVmStatus(payload.message || `Dispatched ${action} for ${vmName}.`);
+            await fetchVms(agent);
+        } catch (error) {
+            setVmStatus(error.message || 'Operation failed.', true);
+        }
+    }
+
+    function selectAgent(agent) {
+        state.selectedAgent = agent;
+        renderAgents();
+        updateAgentLabel(agent);
+        updateSshSection(agent);
+        fetchVms(agent);
+    }
+
+    renderAgents();
+    updateAgentLabel(state.selectedAgent);
+    updateSshSection(state.selectedAgent);
+    if (state.selectedAgent) {
+        fetchVms(state.selectedAgent);
+    } else if (state.agents.length) {
+        setVmStatus('Select a hypervisor to load its virtual machines.');
+    }
+})();
+</script>
+{% endblock %}

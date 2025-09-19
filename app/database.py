@@ -248,6 +248,53 @@ class Database:
             return None
         return self._row_to_user(row)
 
+    def verify_user_password(self, user_id: int, password: str) -> bool:
+        """Return ``True`` if the supplied password matches the stored hash."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+
+        if row is None:
+            return False
+
+        stored_hash = row["password_hash"]
+        if not stored_hash:
+            return False
+
+        return _verify_password(password, stored_hash)
+
+    def update_user_profile(
+        self,
+        user_id: int,
+        *,
+        name: str,
+        email: Optional[str],
+    ) -> User:
+        """Update the display name/email address for an existing user."""
+
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Name must not be empty")
+
+        normalized_email = email.strip().lower() if email else None
+
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    "UPDATE users SET name = ?, email = ? WHERE id = ?",
+                    (normalized_name, normalized_email, user_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("A user with that email already exists") from exc
+
+        refreshed = self.get_user(user_id)
+        if refreshed is None:
+            raise ValueError("User not found")
+        return refreshed
+
     def set_user_password(self, user_id: int, password: str) -> None:
         if not password:
             raise ValueError("Password must not be empty")

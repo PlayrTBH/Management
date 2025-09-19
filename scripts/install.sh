@@ -79,15 +79,33 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+generate_secret() {
+    "$PYTHON_BIN" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+}
+
 if [[ ! -f "$ENV_FILE" ]]; then
-    cat <<'EOF' > "$ENV_FILE"
-# Environment overrides for the PlayrServers management API
+    SESSION_SECRET=$(generate_secret)
+    cat <<EOF > "$ENV_FILE"
+# Environment overrides for the PlayrServers control plane
 # Set MANAGEMENT_DB_PATH if you want to move the SQLite database.
 # Example:
 # MANAGEMENT_DB_PATH=/var/lib/manage-playrservers/management.sqlite3
+MANAGEMENT_PUBLIC_API_URL=https://api.playrservers.com
+MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}
 EOF
     chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
     chmod 640 "$ENV_FILE"
+else
+    if ! grep -q '^MANAGEMENT_PUBLIC_API_URL=' "$ENV_FILE"; then
+        echo 'MANAGEMENT_PUBLIC_API_URL=https://api.playrservers.com' >> "$ENV_FILE"
+    fi
+    if ! grep -q '^MANAGEMENT_SESSION_SECRET=' "$ENV_FILE"; then
+        SESSION_SECRET=$(generate_secret)
+        echo "MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}" >> "$ENV_FILE"
+    fi
 fi
 
 systemctl daemon-reload
@@ -119,6 +137,7 @@ fi
 
 cat <<EOF
 Installation complete.
-The API service is running as ${SERVICE_NAME} and listening on http://${APP_HOST}:${APP_PORT}.
-If nginx is enabled, point DNS for ${APP_DOMAIN} to this host and add TLS using certbot.
+The combined management and API service is running as ${SERVICE_NAME} and listening on http://${APP_HOST}:${APP_PORT}.
+Expose https://${APP_DOMAIN} for the operator UI and forward https://api.playrservers.com to http://${APP_HOST}:${APP_PORT}/api via Cloudflare or nginx.
+Remember to provision TLS certificates for both hostnames.
 EOF

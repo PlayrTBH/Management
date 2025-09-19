@@ -17,21 +17,12 @@ from .security import APIKeyAuth
 from .ssh import CommandResult, SSHClientFactory, SSHCommandRunner, SSHTarget, SSHError
 
 
-class CreateUserRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    email: Optional[str] = Field(default=None, max_length=255)
-
-
 class UserResponse(BaseModel):
     id: int
     name: str
     email: Optional[str]
     api_key_prefix: str
     created_at: datetime
-
-
-class CreateUserResponse(UserResponse):
-    api_key: str
 
 
 class RotateAPIKeyResponse(BaseModel):
@@ -139,12 +130,21 @@ def agent_to_target(agent: Agent) -> SSHTarget:
     )
 
 
-def create_app() -> FastAPI:
-    db_path = resolve_database_path(os.getenv("MANAGEMENT_DB_PATH"))
-    database = Database(db_path)
-    database.initialize()
+def create_app(
+    *,
+    database: Database | None = None,
+    auth: APIKeyAuth | None = None,
+    initialize_database: bool = False,
+) -> FastAPI:
+    if database is None:
+        db_path = resolve_database_path(os.getenv("MANAGEMENT_DB_PATH"))
+        database = Database(db_path)
+        database.initialize()
+    elif initialize_database:
+        database.initialize()
 
-    auth = APIKeyAuth(database)
+    if auth is None:
+        auth = APIKeyAuth(database)
 
     app = FastAPI(
         title="PlayrServers QEMU Manager",
@@ -173,15 +173,6 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def healthcheck() -> Dict[str, str]:
         return {"status": "ok"}
-
-    @app.post("/users", response_model=CreateUserResponse, status_code=status.HTTP_201_CREATED)
-    async def create_user(payload: CreateUserRequest, db: Database = Depends(get_db)) -> CreateUserResponse:
-        try:
-            user, api_key = db.create_user(payload.name.strip(), payload.email.strip() if payload.email else None)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        response = user_to_response(user)
-        return CreateUserResponse(**response.dict(), api_key=api_key)
 
     @app.get("/users/me", response_model=UserResponse)
     async def read_current_user(current_user: User = Depends(get_current_user)) -> UserResponse:

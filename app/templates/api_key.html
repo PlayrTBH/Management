@@ -1,0 +1,56 @@
+{% extends "layout.html" %}
+{% block title %}API Key · PlayrServers Control Plane{% endblock %}
+{% block content %}
+<div class="card">
+    <h1>API credential</h1>
+    <p>This API key authenticates remote automation against the dedicated API endpoint. Protect it like a password and
+    rotate it immediately if you suspect compromise.</p>
+
+    <div class="notice">
+        <p><strong>API base URL:</strong> <code>{{ api_base_url }}</code></p>
+        <p><strong>Current key prefix:</strong> <code>{{ user.api_key_prefix }}</code></p>
+    </div>
+
+    {% if generated_api_key %}
+        <div class="notice">
+            <p><strong>New API key:</strong></p>
+            <pre><code>{{ generated_api_key }}</code></pre>
+            <p class="muted">Copy this value into your agent configuration. It will not be shown again.</p>
+        </div>
+    {% endif %}
+
+    <p>Distribute the API key to remote agents via a secure channel and store it in a root-only configuration file. The
+    example below writes the settings expected by the PlayrServers remote agent:</p>
+
+<pre><code>sudo install -d -m 700 /etc/playrservers
+sudo tee /etc/playrservers/agent.env &gt; /dev/null &lt;&lt;'CONFIG'
+API_BASE_URL={{ api_base_url }}
+API_KEY={{ generated_api_key or '<your-api-key>' }}
+CONFIG
+sudo chmod 600 /etc/playrservers/agent.env
+</code></pre>
+
+    <p>Once configured, the agent can enroll the virtualization host and install SSH keys with the API:</p>
+
+<pre><code>source /etc/playrservers/agent.env
+curl -X POST "$API_BASE_URL/agents" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "hypervisor-01",
+        "hostname": "203.0.113.42",
+        "port": 22,
+        "username": "qemu-admin",
+        "private_key": "$(cat /etc/playrservers/ssh/id_ed25519)"
+      }'
+</code></pre>
+
+    <p class="muted">Replace the placeholder values with your environment. Cloudflare (or another
+    reverse proxy) should route <code>api.playrservers.com</code> traffic to this service's <code>/api</code> mount.</p>
+
+    <form method="post" action="{{ request.url_for('rotate_api_key') }}" style="margin-top: 2rem;">
+        <button type="submit" class="button">Rotate API key</button>
+        <a href="{{ request.url_for('dashboard') }}" class="button secondary">Back to dashboard</a>
+    </form>
+</div>
+{% endblock %}

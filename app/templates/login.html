@@ -1,0 +1,27 @@
+{% extends "layout.html" %}
+{% block title %}Sign in · PlayrServers Control Plane{% endblock %}
+{% block content %}
+<div class="card">
+    <h1>Sign in</h1>
+    <p>Access to the management portal is limited to authorized PlayrServers operators.</p>
+    {% if error %}
+        <div class="notice danger">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="{{ request.url_for('process_login') }}">
+        <div class="field">
+            <label for="email">Email address</label>
+            <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="username" autofocus>
+        </div>
+        <div class="field">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required autocomplete="current-password">
+        </div>
+        <div class="actions">
+            <button type="submit" class="button">Sign in</button>
+        </div>
+    </form>
+    <p class="muted" style="margin-top: 1.5rem;">
+        Self-service registration is disabled. Contact the PlayrServers operations team if you require access.
+    </p>
+</div>
+{% endblock %}

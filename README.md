@@ -40,9 +40,10 @@ proxy for `manage.playrservers.com`.
 sudo ./scripts/install.sh
 ```
 
-> 💡 To install directly from a Git host, publish this repository and execute:
-> `curl -fsSL https://raw.githubusercontent.com/<your-account>/Management/main/scripts/install.sh | sudo bash`
-> (replace the URL with your Git remote).
+> 💡 Because this repository is public you can bootstrap the installer without
+> cloning first:
+> `curl -fsSL https://raw.githubusercontent.com/PlayrServers/Management/main/scripts/install.sh | sudo bash`
+> (set `APP_REPO` or `DEFAULT_APP_REPO` to point at a fork if desired).
 
 Environment variables can tweak the installer without editing the script:
 

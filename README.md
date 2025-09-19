@@ -78,6 +78,14 @@ sudo ./scripts/create_user.py "Alice Ops" alice@example.com
 The script prompts for a password and prints the initial API key once (store it
 securely; subsequent rotations occur from the web portal).
 
+## Updating an existing deployment
+
+Fetch the latest code, refresh Python dependencies, and restart the service without touching your SQLite data (so configured users and hypervisor connections remain intact):
+
+```bash
+sudo -u playrmanager git -C /opt/manage.playrservers pull --ff-only && sudo -u playrmanager /opt/manage.playrservers/.venv/bin/pip install -r /opt/manage.playrservers/requirements.txt && sudo systemctl restart manage-playrservers
+```
+
 ## Configuration
 
 The application stores its data in SQLite and exposes configuration through

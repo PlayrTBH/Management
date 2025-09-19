@@ -38,7 +38,7 @@ for `manage.playrservers.com`. The CLI emits colorised status banners so you
 can track progress at a glance.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PlayrServers/Management/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/PlayrTBH/Management/main/scripts/install.sh | sudo bash
 ```
 
 Already have a clone checked out? Run the same installer locally:

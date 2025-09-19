@@ -89,7 +89,7 @@ curl -X POST "$API_BASE_URL/agents" \
         "private_key": "$(cat /etc/playrservers/ssh/id_ed25519)"
       }'
 </code></pre>
-        <p class="muted">Route <code>{{ api_base_url }}</code> through your reverse proxy (Cloudflare or nginx) to the dedicated API listener (<code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).</p>
+        <p class="muted">The control plane operations team maintains <code>{{ api_base_url }}</code>; reference this URL when configuring agents to reach the API listener (<code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).</p>
     </div>
 </div>
 {% endblock %}

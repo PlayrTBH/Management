@@ -19,7 +19,7 @@
         <div class="grid-2">
             <section>
                 <h3 style="margin-top: 0;">Automation endpoints</h3>
-                <p>Remote agents authenticate against <code>{{ api_base_url }}</code> using your user-scoped API key. Publish the API behind Cloudflare or nginx and forward requests to the dedicated listener (<code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).</p>
+                <p>Remote agents authenticate against <code>{{ api_base_url }}</code> using your user-scoped API key. The control plane operations team keeps this endpoint available; share the base URL with anyone preparing agent deployments.</p>
                 <p class="muted">Rotate compromised keys from the <a href="{{ request.url_for('account') }}" style="color: inherit; text-decoration: underline;">account page</a>. Each rotation is shown once and persisted in the SQLite credential store.</p>
             </section>
             <section>

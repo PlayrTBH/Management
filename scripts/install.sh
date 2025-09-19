@@ -22,15 +22,10 @@ else
     RED=""
 fi
 
-ICON_STEP="🚀"
 ICON_INFO="ℹ️"
 ICON_OK="✅"
 ICON_WARN="⚠️"
 ICON_ERROR="❌"
-
-log_step() {
-    printf "\n%s%s%s %s%s\n" "$CYAN" "$BOLD" "$ICON_STEP" "$1" "$RESET"
-}
 
 log_info() {
     printf "%s%s %s%s\n" "$CYAN" "$ICON_INFO" "$1" "$RESET"
@@ -91,6 +86,98 @@ if [[ "$INSTALL_NGINX" == "1" ]]; then
     APT_PACKAGES+=(nginx)
 fi
 
+LOG_FILE="${LOG_FILE:-/var/log/manage-playrservers-install.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
+: > "$LOG_FILE"
+
+append_log() {
+    printf '%s\n' "$1" >> "$LOG_FILE"
+}
+
+run_cmd() {
+    append_log "==> $(printf '%q ' "$@")"
+    "$@" >> "$LOG_FILE" 2>&1
+}
+
+PROGRESS_WIDTH=32
+TOTAL_SECTIONS=7
+if [[ "$INSTALL_NGINX" == "1" ]]; then
+    TOTAL_SECTIONS=$((TOTAL_SECTIONS + 1))
+fi
+COMPLETED_SECTIONS=0
+CURRENT_TITLE=""
+PROGRESS_ACTIVE=0
+
+progress_clear() {
+    printf '\r\033[2K'
+}
+
+render_progress() {
+    local completed=$1
+    local display_index=$2
+    local title=$3
+    local total=$TOTAL_SECTIONS
+    local width=$PROGRESS_WIDTH
+
+    if (( completed > total )); then
+        completed=$total
+    fi
+
+    local filled=0
+    if (( total > 0 )); then
+        filled=$(( completed * width / total ))
+    fi
+
+    local bar=""
+    for ((i = 0; i < width; i++)); do
+        if (( i < filled )); then
+            bar+="#"
+        elif (( i == filled && completed < total )); then
+            bar+=">"
+        else
+            bar+="-"
+        fi
+    done
+
+    local percent=0
+    if (( total > 0 )); then
+        percent=$(( completed * 100 / total ))
+    fi
+
+    progress_clear
+    printf "%s[%s]%s %3d%% (%d/%d) %s%s" \
+        "$CYAN$BOLD" "$bar" "$RESET" \
+        "$percent" "$display_index" "$total" "$title" "$RESET"
+    PROGRESS_ACTIVE=1
+}
+
+progress_start() {
+    CURRENT_TITLE="$1"
+    local display_index=$((COMPLETED_SECTIONS + 1))
+    if (( display_index > TOTAL_SECTIONS )); then
+        display_index=$TOTAL_SECTIONS
+    fi
+    render_progress "$COMPLETED_SECTIONS" "$display_index" "Installing: $CURRENT_TITLE"
+}
+
+progress_complete() {
+    COMPLETED_SECTIONS=$((COMPLETED_SECTIONS + 1))
+}
+
+progress_finish() {
+    render_progress "$COMPLETED_SECTIONS" "$TOTAL_SECTIONS" "Installation complete"
+    printf '\n'
+    PROGRESS_ACTIVE=0
+}
+
+run_section() {
+    local title="$1"
+    shift
+    progress_start "$title"
+    "$@"
+    progress_complete
+}
+
 FAILED=0
 SERVICE_ACTIVE=0
 
@@ -98,22 +185,35 @@ on_error() {
     local line=$1
     local code=$2
     FAILED=1
+    if (( PROGRESS_ACTIVE == 1 )); then
+        progress_clear
+        printf '\n'
+        PROGRESS_ACTIVE=0
+    fi
     log_error "Installation aborted (line ${line}, exit code ${code})."
+    log_info "Review ${LOG_FILE} for details."
     exit "$code"
 }
 
 on_exit() {
-    if [[ $FAILED -eq 0 ]]; then
-        if [[ $SERVICE_ACTIVE -eq 1 ]]; then
+    if (( FAILED == 0 )); then
+        if (( PROGRESS_ACTIVE == 1 )); then
+            printf '\n'
+            PROGRESS_ACTIVE=0
+        fi
+        if (( SERVICE_ACTIVE == 1 )); then
             log_success "Installation complete. Service '${SERVICE_NAME}' is active."
             log_info "Management UI: http://${APP_HOST}:${APP_PORT}"
-            log_info "API endpoint: http://${APP_API_HOST}:${APP_API_PORT}"
+            log_info "Automation API: http://${APP_API_HOST}:${APP_API_PORT}"
             log_info "Environment overrides: ${ENV_FILE}"
-            log_info "Expose https://${APP_DOMAIN} and https://${API_DOMAIN} via your reverse proxy."
+            if [[ "$INSTALL_NGINX" != "1" ]]; then
+                log_info "nginx configuration was skipped (INSTALL_NGINX=${INSTALL_NGINX})."
+            fi
         else
             log_warn "Installation finished but the '${SERVICE_NAME}' service is not running."
             log_warn "Inspect 'journalctl -u ${SERVICE_NAME}' for additional details."
         fi
+        log_info "Installer log: ${LOG_FILE}"
     fi
 }
 
@@ -122,60 +222,60 @@ trap on_exit EXIT
 
 print_banner
 
-log_step "Preparing system packages"
-export DEBIAN_FRONTEND=noninteractive
-log_info "Updating apt repositories"
-apt-get update
-log_info "Installing packages: ${APT_PACKAGES[*]}"
-apt-get install -y "${APT_PACKAGES[@]}"
-log_success "System dependencies installed."
+append_log "=== PlayrServers Control Plane Installer ==="
+append_log "$(date -Is)"
 
-log_step "Configuring application account"
-if ! id "$APP_USER" &>/dev/null; then
-    log_info "Creating system user ${APP_USER}"
-    useradd --system --create-home --home-dir "/var/lib/${SERVICE_NAME}" --shell /usr/sbin/nologin "$APP_USER"
-else
-    log_info "System user ${APP_USER} already exists"
-fi
-log_info "Ensuring application directory ${APP_DIR}"
-mkdir -p "$APP_DIR"
-log_success "Account ready."
+prepare_system_packages() {
+    append_log "-- Preparing system packages"
+    export DEBIAN_FRONTEND=noninteractive
+    run_cmd apt-get update
+    run_cmd apt-get install -y "${APT_PACKAGES[@]}"
+}
 
-log_step "Deploying application code"
-if [[ -n "$APP_REPO" ]]; then
-    log_info "Syncing from Git repository ${APP_REPO} (branch ${APP_BRANCH})"
-    if [[ ! -d "$APP_DIR/.git" ]]; then
-        git clone --branch "$APP_BRANCH" "$APP_REPO" "$APP_DIR"
+configure_application_account() {
+    append_log "-- Configuring application account"
+    if ! id "$APP_USER" &>/dev/null; then
+        run_cmd useradd --system --create-home --home-dir "/var/lib/${SERVICE_NAME}" --shell /usr/sbin/nologin "$APP_USER"
     else
-        git -C "$APP_DIR" fetch --all --tags
-        git -C "$APP_DIR" checkout "$APP_BRANCH"
-        git -C "$APP_DIR" pull --ff-only
+        append_log "System user ${APP_USER} already exists"
     fi
-else
-    if [[ -z "$PROJECT_ROOT" ]]; then
-        log_error "Unable to determine project root. Set APP_REPO or run from a repository checkout."
-        exit 1
+    run_cmd mkdir -p "$APP_DIR"
+}
+
+deploy_application_code() {
+    append_log "-- Deploying application code"
+    if [[ -n "$APP_REPO" ]]; then
+        if [[ ! -d "$APP_DIR/.git" ]]; then
+            run_cmd git clone --branch "$APP_BRANCH" "$APP_REPO" "$APP_DIR"
+        else
+            run_cmd git -C "$APP_DIR" fetch --all --tags
+            run_cmd git -C "$APP_DIR" checkout "$APP_BRANCH"
+            run_cmd git -C "$APP_DIR" pull --ff-only
+        fi
+    else
+        if [[ -z "$PROJECT_ROOT" ]]; then
+            log_error "Unable to determine project root. Set APP_REPO or run from a repository checkout."
+            exit 1
+        fi
+        run_cmd rsync -a --delete "$PROJECT_ROOT/" "$APP_DIR/" \
+            --exclude '.git' \
+            --exclude '.venv' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc'
     fi
-    log_info "Copying local checkout from ${PROJECT_ROOT}"
-    rsync -a --delete "$PROJECT_ROOT/" "$APP_DIR/" \
-        --exclude '.git' \
-        --exclude '.venv' \
-        --exclude '__pycache__' \
-        --exclude '*.pyc'
-fi
-log_success "Application synced to ${APP_DIR}."
+}
 
-log_step "Bootstrapping Python environment"
-chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"
-log_info "Creating virtual environment"
-sudo -u "$APP_USER" "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
-log_info "Installing Python dependencies"
-sudo -u "$APP_USER" bash -c "set -euo pipefail; source '$APP_DIR/.venv/bin/activate'; pip install --upgrade pip; pip install -r '$APP_DIR/requirements.txt'"
-install -d -m 750 -o "$APP_USER" -g "$APP_GROUP" "$APP_DIR/data"
-log_success "Python environment ready."
+bootstrap_python_environment() {
+    append_log "-- Bootstrapping Python environment"
+    run_cmd chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"
+    run_cmd sudo -u "$APP_USER" "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
+    run_cmd sudo -u "$APP_USER" bash -c "set -euo pipefail; source '$APP_DIR/.venv/bin/activate'; pip install --upgrade pip; pip install -r '$APP_DIR/requirements.txt'"
+    run_cmd install -d -m 750 -o "$APP_USER" -g "$APP_GROUP" "$APP_DIR/data"
+}
 
-log_step "Configuring systemd service"
-cat <<EOF > "/etc/systemd/system/${SERVICE_NAME}.service"
+configure_systemd_service() {
+    append_log "-- Writing systemd service unit"
+    cat <<EOF > "/etc/systemd/system/${SERVICE_NAME}.service"
 [Unit]
 Description=PlayrServers management API
 After=network-online.target
@@ -198,6 +298,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+}
 
 generate_secret() {
     "$PYTHON_BIN" - <<'PY'
@@ -206,10 +307,11 @@ print(secrets.token_urlsafe(48))
 PY
 }
 
-if [[ ! -f "$ENV_FILE" ]]; then
-    log_info "Creating environment file ${ENV_FILE}"
-    SESSION_SECRET=$(generate_secret)
-    cat <<EOF > "$ENV_FILE"
+configure_environment_file() {
+    append_log "-- Configuring environment defaults"
+    if [[ ! -f "$ENV_FILE" ]]; then
+        SESSION_SECRET=$(generate_secret)
+        cat <<EOF > "$ENV_FILE"
 # Environment overrides for the PlayrServers control plane
 # Set MANAGEMENT_DB_PATH if you want to move the SQLite database.
 # Example:
@@ -217,36 +319,36 @@ if [[ ! -f "$ENV_FILE" ]]; then
 MANAGEMENT_PUBLIC_API_URL=https://${API_DOMAIN}
 MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}
 EOF
-    chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
-    chmod 640 "$ENV_FILE"
-else
-    log_info "Updating environment file ${ENV_FILE}"
-    if ! grep -q '^MANAGEMENT_PUBLIC_API_URL=' "$ENV_FILE"; then
-        echo "MANAGEMENT_PUBLIC_API_URL=https://${API_DOMAIN}" >> "$ENV_FILE"
+        run_cmd chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
+        run_cmd chmod 640 "$ENV_FILE"
+    else
+        append_log "Environment file ${ENV_FILE} already exists"
+        if ! grep -q '^MANAGEMENT_PUBLIC_API_URL=' "$ENV_FILE"; then
+            echo "MANAGEMENT_PUBLIC_API_URL=https://${API_DOMAIN}" >> "$ENV_FILE"
+        fi
+        if ! grep -q '^MANAGEMENT_SESSION_SECRET=' "$ENV_FILE"; then
+            SESSION_SECRET=$(generate_secret)
+            echo "MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}" >> "$ENV_FILE"
+        fi
     fi
-    if ! grep -q '^MANAGEMENT_SESSION_SECRET=' "$ENV_FILE"; then
-        SESSION_SECRET=$(generate_secret)
-        echo "MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}" >> "$ENV_FILE"
+}
+
+start_services() {
+    append_log "-- Starting services"
+    run_cmd systemctl daemon-reload
+    run_cmd systemctl enable --now "$SERVICE_NAME"
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        SERVICE_ACTIVE=1
+        append_log "Service ${SERVICE_NAME} is active"
+    else
+        append_log "Service ${SERVICE_NAME} failed to start"
+        return 1
     fi
-fi
+}
 
-log_info "Reloading systemd units"
-systemctl daemon-reload
-log_info "Enabling and starting ${SERVICE_NAME}"
-systemctl enable --now "$SERVICE_NAME"
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-    SERVICE_ACTIVE=1
-    log_success "Systemd service '${SERVICE_NAME}' is active."
-else
-    FAILED=1
-    log_error "Systemd service '${SERVICE_NAME}' failed to start."
-    log_warn "Run 'journalctl -u ${SERVICE_NAME}' to review the failure."
-    exit 1
-fi
-
-if [[ "$INSTALL_NGINX" == "1" ]]; then
-    log_step "Configuring nginx reverse proxy"
-    NGINX_CONF="/etc/nginx/sites-available/${SERVICE_NAME}.conf"
+configure_nginx_site() {
+    append_log "-- Configuring nginx"
+    local NGINX_CONF="/etc/nginx/sites-available/${SERVICE_NAME}.conf"
     cat <<EOF > "$NGINX_CONF"
 server {
     listen 80;
@@ -274,15 +376,24 @@ server {
     }
 }
 EOF
-    ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/${SERVICE_NAME}.conf"
+    run_cmd ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/${SERVICE_NAME}.conf"
     if [[ -f /etc/nginx/sites-enabled/default ]]; then
-        rm -f /etc/nginx/sites-enabled/default
+        run_cmd rm -f /etc/nginx/sites-enabled/default
     fi
-    log_info "Validating nginx configuration"
-    nginx -t
-    log_info "Reloading nginx"
-    systemctl reload nginx
-    log_success "nginx configuration applied."
-else
-    log_warn "Skipping nginx configuration (INSTALL_NGINX=0)."
+    run_cmd nginx -t
+    run_cmd systemctl reload nginx
+}
+
+run_section "Preparing system packages" prepare_system_packages
+run_section "Configuring application account" configure_application_account
+run_section "Deploying application code" deploy_application_code
+run_section "Bootstrapping Python environment" bootstrap_python_environment
+run_section "Writing systemd unit" configure_systemd_service
+run_section "Configuring environment defaults" configure_environment_file
+run_section "Starting services" start_services
+
+if [[ "$INSTALL_NGINX" == "1" ]]; then
+    run_section "Configuring nginx" configure_nginx_site
 fi
+
+progress_finish

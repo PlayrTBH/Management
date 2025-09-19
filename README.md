@@ -2,14 +2,14 @@
 
 A hardened FastAPI application that exposes both a password-protected operator
 portal and a machine-to-machine API for orchestrating remote QEMU/KVM
-hypervisors. Deploy the management UI at **https://manage.playrservers.com** and
-publish the automation API at **https://api.playrservers.com** (typically by
-proxying the backend's dedicated API port through Cloudflare or nginx). Remote
-hypervisors run
-a lightweight agent that authenticates with this application using a
-user-scoped API key issued through the management interface. Each operator owns
-their agents, SSH credentials, and audit history; no sensitive material is
-shared across accounts.
+hypervisors. The management UI lives at **https://manage.playrservers.com** and
+the automation API at **https://api.playrservers.com**, both operated by the
+PlayrServers control plane team. Remote hypervisors run a lightweight agent that
+authenticates with this application using a user-scoped API key issued through
+the management interface. Each operator owns their agents, SSH credentials, and
+audit history; no sensitive material is shared across accounts. Operators using
+the portal focus on onboarding hypervisors and agents—the hosting
+infrastructure is maintained separately by the platform team.
 
 ## Key Features
 
@@ -33,8 +33,8 @@ shared across accounts.
 
 Run the installer with a **single command** on a fresh Ubuntu 24.04 server. The
 script installs system dependencies, provisions a Python virtual environment,
-creates a systemd service, and (optionally) configures nginx as a reverse proxy
-for `manage.playrservers.com`. The CLI emits colorised status banners so you
+creates a systemd service, and (optionally) configures nginx to publish the
+management and API endpoints. The CLI emits colorised status banners so you
 can track progress at a glance.
 
 ```bash
@@ -52,8 +52,8 @@ Environment variables can tweak the installer without editing the script:
 - `APP_REPO` – clone/pull from a Git URL instead of copying the current
   directory.
 - `APP_DIR` – installation directory (default `/opt/manage.playrservers`).
-- `APP_DOMAIN` – nginx server name for the management UI (default `manage.playrservers.com`).
-- `API_DOMAIN` – nginx server name for the public API (default `api.playrservers.com`).
+- `APP_DOMAIN` – public hostname for the management UI when publishing via nginx (default `manage.playrservers.com`).
+- `API_DOMAIN` – public hostname for the automation API when publishing via nginx (default `api.playrservers.com`).
 - `APP_PORT` – internal management UI port (default `8000`).
 - `APP_API_PORT` – internal API port (default `8001`).
 - `APP_API_HOST` – bind address for the API service (defaults to `APP_HOST`).
@@ -63,11 +63,10 @@ After installation the `manage-playrservers` systemd unit supervises both
 services: the management UI listens on port `8000` and the public API listens on
 port `8001`, binding to all interfaces by default. You can reach the UI directly
 from your LAN using the server's IP address (for example,
-`http://192.168.1.212:8000`). Publish `https://manage.playrservers.com` by
-proxying requests to the management port and forward
-`https://api.playrservers.com` to the API port (Cloudflare page rules or nginx
-both work). Obtain TLS certificates for both hostnames before exposing them to
-the internet.
+`http://192.168.1.212:8000`). Expose `https://manage.playrservers.com` by
+routing requests to the management port and map
+`https://api.playrservers.com` to the API port. Ensure TLS certificates cover
+both hostnames before exposing them to the internet.
 
 Provision operator accounts from the server; self-registration is disabled:
 
@@ -109,13 +108,13 @@ The systemd unit installed by `scripts/install.sh` sources `/etc/manage-playrser
 
 ## Management interface
 
-Navigate to `https://manage.playrservers.com` (or whichever hostname you proxy
-to the root of the service) to access the operator portal. Accounts are created
+Navigate to `https://manage.playrservers.com` (or the hostname assigned by your
+platform team) to access the operator portal. Accounts are created
 with `scripts/create_user.py` and authenticate with an email + password. The UI
 exposes three primary workflows:
 
 - **Dashboard** – high-level overview of the deployment, including the API base
-  URL that remote agents should target through Cloudflare or nginx.
+  URL that remote agents should target when connecting to the control plane.
 - **Account &amp; API key** – update profile information, rotate credentials, and
   copy onboarding snippets for the remote agent.
 - **Hypervisor management** – register virtualization hosts, inspect their
@@ -129,8 +128,8 @@ Session cookies are signed with `MANAGEMENT_SESSION_SECRET` and marked
 ## API Overview
 
 The automation endpoints live on the dedicated API service (default port `8001`).
-When publishing `https://api.playrservers.com`, proxy that host to the API port
-so public requests continue to use simple paths (e.g. `/health`, `/agents`). Every endpoint
+When exposing `https://api.playrservers.com`, route that host to the API port so
+public requests continue to use simple paths (e.g. `/health`, `/agents`). Every endpoint
 except `/health` requires an API key presented in the `Authorization: Bearer <key>` header.
 
 ### Health
@@ -196,8 +195,7 @@ Responses include the executed command, exit status, stdout, and stderr.
   hypervisors and protected with strong passphrases.
 - The management host does **not** install QEMU/libvirt. Agents run on the
   virtualization servers themselves and expose access over SSH to `virsh`.
-- Deploy behind TLS (nginx + certbot or another reverse proxy) to protect API
-  credentials in transit.
+- Ensure TLS termination protects API credentials in transit.
 - Restrict network access to the management host; this portal is for personal
   use and is not meant for a public audience.
 - Back up `data/management.sqlite3` regularly to preserve user profiles and

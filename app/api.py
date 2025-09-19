@@ -70,11 +70,6 @@ class AgentResponse(BaseModel):
     created_at: datetime
 
 
-class AgentCredentialsResponse(AgentResponse):
-    private_key: str
-    private_key_passphrase: Optional[str]
-
-
 class AccountProfileResponse(BaseModel):
     username: Optional[str] = Field(default=None, max_length=64)
     authorized_keys: List[str] = Field(..., min_length=1)
@@ -189,11 +184,6 @@ def agent_to_response(agent: Agent) -> AgentResponse:
         known_hosts_path=agent.known_hosts_path,
         created_at=agent.created_at,
     )
-
-
-def agent_to_credentials(agent: Agent) -> AgentCredentialsResponse:
-    base = agent_to_response(agent)
-    return AgentCredentialsResponse(**base.dict(), private_key=agent.private_key, private_key_passphrase=agent.private_key_passphrase)
 
 
 def agent_to_target(agent: Agent) -> SSHTarget:
@@ -314,10 +304,6 @@ def create_app(
     @protected_router.get("/agents/{agent_id}", response_model=AgentResponse)
     async def read_agent(agent: Agent = Depends(get_agent)) -> AgentResponse:
         return agent_to_response(agent)
-
-    @protected_router.get("/agents/{agent_id}/credentials", response_model=AgentCredentialsResponse)
-    async def read_agent_credentials(agent: Agent = Depends(get_agent)) -> AgentCredentialsResponse:
-        return agent_to_credentials(agent)
 
     @protected_router.post("/v1/servers/connect", response_model=AgentConnectResponse)
     async def register_server(

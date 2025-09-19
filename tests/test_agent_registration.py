@@ -188,3 +188,44 @@ def test_agent_registration_updates_when_ip_changes(tmp_path: Path):
     assert agent.hostname == "192.0.2.20"
     assert agent.name == "hv-01"
 
+
+def test_private_key_cannot_be_retrieved_via_api(tmp_path: Path):
+    app, database, user, api_key, _ = _build_app(tmp_path)
+
+    agent = database.create_agent(
+        user.id,
+        name="hv-sensitive",
+        hostname="198.51.100.10",
+        port=2222,
+        username="hvdeploy",
+        private_key=PRIVATE_KEY,
+        private_key_passphrase="secret-passphrase",
+        allow_unknown_hosts=False,
+        known_hosts_path=None,
+    )
+
+    with TestClient(app) as client:
+        listing = client.get("/agents", headers=_auth_header(api_key))
+        assert listing.status_code == 200
+        listing_payload = listing.json()
+        assert listing_payload
+        first_agent = next(
+            (item for item in listing_payload if item["id"] == agent.id),
+            None,
+        )
+        assert first_agent is not None
+        assert "private_key" not in first_agent
+        assert "private_key_passphrase" not in first_agent
+
+        detail = client.get(f"/agents/{agent.id}", headers=_auth_header(api_key))
+        assert detail.status_code == 200
+        detail_payload = detail.json()
+        assert detail_payload["id"] == agent.id
+        assert "private_key" not in detail_payload
+        assert "private_key_passphrase" not in detail_payload
+
+        credentials = client.get(
+            f"/agents/{agent.id}/credentials", headers=_auth_header(api_key)
+        )
+        assert credentials.status_code == 404
+

@@ -162,9 +162,14 @@ API does not expose a self-registration endpoint.
 | GET    | `/agents`                          | List the caller's registered agents           |
 | POST   | `/agents`                          | Register a new agent / virtualization host    |
 | GET    | `/agents/{id}`                     | Retrieve metadata for a specific agent        |
-| GET    | `/agents/{id}/credentials`         | Retrieve the agent's stored SSH key material  |
 | PATCH  | `/agents/{id}`                     | Update agent metadata or credentials          |
 | DELETE | `/agents/{id}`                     | Remove an agent                               |
+
+> **Security note:** SSH private keys uploaded to the control plane are stored
+> encrypted at rest and are never retrievable via the public API. Legacy
+> clients that previously called `/agents/{id}/credentials` now receive a
+> `404 Not Found` response and should instead rely on key material supplied at
+> registration time or the automatic provisioning flow documented below.
 
 Agent registration payload example:
 
@@ -191,7 +196,9 @@ request must include an API key along with either a `hostname` or
 connection details. On success the management API creates (or updates) the
 hypervisor entry under **Hypervisors**, seeds it with the operator's automation
 SSH private key, and returns the matching public key material for installation
-on the host.
+on the host. Agents should consume this endpoint instead of attempting to fetch
+private keys from the API—the credentials are automatically provisioned as part
+of the registration handshake and never exposed in subsequent responses.
 
 The API reads the private key from
 `MANAGEMENT_AGENT_PRIVATE_KEY_PATH` (default `/etc/playrservers/ssh/id_ed25519`)

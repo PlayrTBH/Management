@@ -1,4 +1,6 @@
+import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -46,3 +48,52 @@ def test_login_redirects_to_dashboard_when_credentials_valid(tmp_path):
 
         follow = client.get("/dashboard", follow_redirects=False)
         assert follow.status_code == 200
+
+
+def test_management_page_renders_with_registered_agent(tmp_path):
+    database = Database(tmp_path / "management.sqlite3")
+    database.initialize()
+    user, _ = database.create_user("Agent Owner", EMAIL, PASSWORD)
+    agent = database.create_agent(
+        user.id,
+        name="hypervisor-01",
+        hostname="203.0.113.10",
+        port=2222,
+        username="hvdeploy",
+        private_key="-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----",
+        private_key_passphrase=None,
+        allow_unknown_hosts=False,
+        known_hosts_path=None,
+    )
+
+    app = create_app(
+        database=database,
+        session_secret="not-so-secret",
+        api_base_url="https://example.com",
+    )
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/login",
+            data={"email": EMAIL, "password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        response = client.get("/management")
+        assert response.status_code == 200
+
+        match = re.search(
+            r"<script id=\"agent-data\" type=\"application/json\">(.*?)</script>",
+            response.text,
+            re.DOTALL,
+        )
+        assert match is not None
+
+        agents_payload = json.loads(match.group(1))
+        assert agents_payload
+        assert agents_payload[0]["id"] == agent.id
+        assert (
+            agents_payload[0]["remove_url"]
+            == f"http://testserver/management/agents/{agent.id}/delete"
+        )

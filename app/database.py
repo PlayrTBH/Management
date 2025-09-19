@@ -398,6 +398,26 @@ class Database:
             return None
         return self._row_to_agent(row)
 
+    def find_agent_by_hostname(self, user_id: int, hostname: str) -> Optional[Agent]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM agents WHERE user_id = ? AND hostname = ?",
+                (user_id, hostname),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_agent(row)
+
+    def find_agent_by_name(self, user_id: int, name: str) -> Optional[Agent]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM agents WHERE user_id = ? AND name = ?",
+                (user_id, name),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_agent(row)
+
     def delete_agent(self, user_id: int, agent_id: int) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(

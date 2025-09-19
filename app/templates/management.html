@@ -110,6 +110,48 @@
 
     <div class="card">
         <div class="section-header">
+            <h2>Host diagnostics</h2>
+            <span class="badge" id="host-info-timestamp">{% if selected_agent %}Awaiting data{% else %}Idle{% endif %}</span>
+        </div>
+        <div id="host-info-placeholder" class="placeholder-box">
+            {% if not agents %}
+                Register a hypervisor to monitor its performance metrics.
+            {% elif not selected_agent %}
+                Select a hypervisor to view system metrics.
+            {% else %}
+                Collecting host diagnostics…
+            {% endif %}
+        </div>
+        <div id="host-info-section" style="display: none;">
+            <div id="host-info-message" class="notice" style="display: none;"></div>
+            <div class="host-info-grid">
+                <div>
+                    <h3>System facts</h3>
+                    <dl class="stat-list">
+                        <div><dt>Hostname</dt><dd id="host-system-hostname">—</dd></div>
+                        <div><dt>Kernel</dt><dd id="host-kernel">—</dd></div>
+                        <div><dt>SSH user</dt><dd id="host-system-user">—</dd></div>
+                        <div><dt>CPU model</dt><dd id="host-cpu-model">—</dd></div>
+                        <div><dt>CPU(s)</dt><dd id="host-cpu-count">—</dd></div>
+                        <div><dt>CPU frequency</dt><dd id="host-cpu-frequency">—</dd></div>
+                        <div><dt>Memory</dt><dd id="host-memory-total">—</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <h3>Performance</h3>
+                    <dl class="stat-list">
+                        <div><dt>Load avg (1/5/15m)</dt><dd id="host-load">—</dd></div>
+                        <div><dt>Memory usage</dt><dd id="host-memory-usage">—</dd></div>
+                        <div><dt>Memory available</dt><dd id="host-memory-available">—</dd></div>
+                        <div><dt>Collected</dt><dd id="host-info-updated">—</dd></div>
+                    </dl>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
             <h2>Direct SSH console</h2>
             <span class="badge warning">Operator access</span>
         </div>
@@ -166,6 +208,23 @@
     const sshCommand = document.getElementById('ssh-command');
     const sshSection = document.getElementById('ssh-section');
     const sshPlaceholder = document.getElementById('ssh-placeholder');
+    const hostInfoPlaceholder = document.getElementById('host-info-placeholder');
+    const hostInfoSection = document.getElementById('host-info-section');
+    const hostInfoMessage = document.getElementById('host-info-message');
+    const hostInfoTimestamp = document.getElementById('host-info-timestamp');
+    const hostSystemHostname = document.getElementById('host-system-hostname');
+    const hostSystemUser = document.getElementById('host-system-user');
+    const hostKernel = document.getElementById('host-kernel');
+    const hostCpuModel = document.getElementById('host-cpu-model');
+    const hostCpuCount = document.getElementById('host-cpu-count');
+    const hostCpuFrequency = document.getElementById('host-cpu-frequency');
+    const hostMemoryTotal = document.getElementById('host-memory-total');
+    const hostMemoryUsage = document.getElementById('host-memory-usage');
+    const hostMemoryAvailable = document.getElementById('host-memory-available');
+    const hostInfoUpdated = document.getElementById('host-info-updated');
+    const hostLoad = document.getElementById('host-load');
+
+    let hostInfoTimer = null;
 
     function buildUrl(template, agentId, vmName, action) {
         let url = template.replace('/0/', '/' + agentId + '/');
@@ -176,6 +235,280 @@
             url = url.replace('__ACTION__', action);
         }
         return url;
+    }
+
+    function clearHostInfoTimer() {
+        if (hostInfoTimer !== null) {
+            clearTimeout(hostInfoTimer);
+            hostInfoTimer = null;
+        }
+    }
+
+    function isFiniteNumber(value) {
+        return typeof value === 'number' && Number.isFinite(value);
+    }
+
+    function humanizeBytes(bytes) {
+        if (!isFiniteNumber(bytes)) {
+            return 'Unavailable';
+        }
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+        let index = 0;
+        let value = bytes;
+        while (value >= 1024 && index < units.length - 1) {
+            value /= 1024;
+            index += 1;
+        }
+        const precision = value >= 10 || index === 0 ? 0 : 1;
+        return `${value.toFixed(precision)} ${units[index]}`;
+    }
+
+    function parseNodeinfoMemory(value) {
+        if (typeof value !== 'string') {
+            return null;
+        }
+        const match = value.match(/([0-9.]+)\s*KiB/i);
+        if (!match) {
+            return null;
+        }
+        const parsed = parseFloat(match[1]);
+        if (!Number.isFinite(parsed)) {
+            return null;
+        }
+        return parsed * 1024;
+    }
+
+    function formatNodeinfoMemory(value) {
+        const bytes = parseNodeinfoMemory(value);
+        if (bytes === null) {
+            return value || 'Unavailable';
+        }
+        return humanizeBytes(bytes);
+    }
+
+    function formatLoadAverage(load) {
+        if (!load || !isFiniteNumber(load.one) || !isFiniteNumber(load.five) || !isFiniteNumber(load.fifteen)) {
+            return 'Unavailable';
+        }
+        return `${load.one.toFixed(2)} / ${load.five.toFixed(2)} / ${load.fifteen.toFixed(2)}`;
+    }
+
+    function formatMemoryUsage(memory) {
+        if (!memory || !isFiniteNumber(memory.total_bytes) || !isFiniteNumber(memory.used_bytes)) {
+            return 'Unavailable';
+        }
+        const used = humanizeBytes(memory.used_bytes);
+        const total = humanizeBytes(memory.total_bytes);
+        const percentText = isFiniteNumber(memory.usage_percent)
+            ? ` (${memory.usage_percent.toFixed(1)}%)`
+            : '';
+        return `${used} / ${total}${percentText}`;
+    }
+
+    function resetHostInfoFields() {
+        const fields = [
+            hostSystemHostname,
+            hostSystemUser,
+            hostKernel,
+            hostCpuModel,
+            hostCpuCount,
+            hostCpuFrequency,
+            hostMemoryTotal,
+            hostMemoryUsage,
+            hostMemoryAvailable,
+            hostInfoUpdated,
+            hostLoad,
+        ];
+        fields.forEach((field) => {
+            if (field) {
+                field.textContent = '—';
+            }
+        });
+    }
+
+    function setHostInfoBadge(text) {
+        if (hostInfoTimestamp) {
+            hostInfoTimestamp.textContent = text;
+        }
+    }
+
+    function showHostInfoPlaceholder(message, badgeText = 'Idle') {
+        if (!hostInfoPlaceholder || !hostInfoSection) {
+            return;
+        }
+        clearHostInfoTimer();
+        resetHostInfoFields();
+        hostInfoPlaceholder.textContent = message;
+        hostInfoPlaceholder.style.display = '';
+        hostInfoSection.style.display = 'none';
+        if (hostInfoMessage) {
+            hostInfoMessage.textContent = '';
+            hostInfoMessage.className = 'notice';
+            hostInfoMessage.style.display = 'none';
+        }
+        setHostInfoBadge(badgeText);
+    }
+
+    function setHostInfoLoading(agent) {
+        if (!hostInfoPlaceholder || !hostInfoSection) {
+            return;
+        }
+        clearHostInfoTimer();
+        resetHostInfoFields();
+        hostInfoPlaceholder.textContent = `Collecting host diagnostics from ${agent.name}…`;
+        hostInfoPlaceholder.style.display = '';
+        hostInfoSection.style.display = 'none';
+        if (hostInfoMessage) {
+            hostInfoMessage.textContent = '';
+            hostInfoMessage.className = 'notice';
+            hostInfoMessage.style.display = 'none';
+        }
+        setHostInfoBadge('Loading…');
+    }
+
+    function showHostInfoError(message) {
+        if (!hostInfoSection || !hostInfoPlaceholder) {
+            return;
+        }
+        clearHostInfoTimer();
+        resetHostInfoFields();
+        hostInfoSection.style.display = '';
+        hostInfoPlaceholder.style.display = 'none';
+        if (hostInfoMessage) {
+            hostInfoMessage.textContent = message;
+            hostInfoMessage.className = 'notice danger';
+            hostInfoMessage.style.display = '';
+        }
+        setHostInfoBadge('Error');
+        if (hostInfoUpdated) {
+            hostInfoUpdated.textContent = '—';
+        }
+    }
+
+    function renderHostInfo(payload) {
+        if (!hostInfoSection || !hostInfoPlaceholder) {
+            return;
+        }
+        resetHostInfoFields();
+        hostInfoPlaceholder.style.display = 'none';
+        hostInfoSection.style.display = '';
+
+        if (hostInfoMessage) {
+            if (Array.isArray(payload.warnings) && payload.warnings.length) {
+                hostInfoMessage.textContent = payload.warnings.join(' ');
+                hostInfoMessage.className = 'notice warning';
+                hostInfoMessage.style.display = '';
+            } else {
+                hostInfoMessage.textContent = '';
+                hostInfoMessage.className = 'notice';
+                hostInfoMessage.style.display = 'none';
+            }
+        }
+
+        const system = payload.system || {};
+        if (hostSystemHostname) {
+            hostSystemHostname.textContent = system.hostname || '—';
+        }
+        if (hostSystemUser) {
+            hostSystemUser.textContent = system.username || '—';
+        }
+        if (hostKernel) {
+            hostKernel.textContent = system.kernel || 'Unavailable';
+        }
+
+        const nodeinfo = payload.nodeinfo || {};
+        if (hostCpuModel) {
+            hostCpuModel.textContent = nodeinfo['CPU model'] || '—';
+        }
+        if (hostCpuCount) {
+            hostCpuCount.textContent = nodeinfo['CPU(s)'] || '—';
+        }
+        if (hostCpuFrequency) {
+            hostCpuFrequency.textContent = nodeinfo['CPU frequency'] || '—';
+        }
+        if (hostMemoryTotal) {
+            hostMemoryTotal.textContent = formatNodeinfoMemory(nodeinfo['Memory size']);
+        }
+
+        const performance = payload.performance || {};
+        if (hostLoad) {
+            hostLoad.textContent = formatLoadAverage(performance.load_average);
+        }
+        const memory = performance.memory || null;
+        if (hostMemoryUsage) {
+            hostMemoryUsage.textContent = formatMemoryUsage(memory);
+        }
+        if (hostMemoryAvailable) {
+            hostMemoryAvailable.textContent = memory && isFiniteNumber(memory.available_bytes)
+                ? humanizeBytes(memory.available_bytes)
+                : 'Unavailable';
+        }
+
+        if (hostInfoUpdated) {
+            hostInfoUpdated.textContent = payload.collected_at
+                ? new Date(payload.collected_at).toLocaleString()
+                : '—';
+        }
+        if (hostInfoTimestamp) {
+            hostInfoTimestamp.textContent = payload.collected_at
+                ? `Updated ${new Date(payload.collected_at).toLocaleTimeString()}`
+                : 'Updated just now';
+        }
+    }
+
+    function scheduleHostInfoRefresh(agent) {
+        clearHostInfoTimer();
+        if (!agent || !state.endpoints.host_info) {
+            return;
+        }
+        hostInfoTimer = window.setTimeout(() => {
+            if (!state.selectedAgent || state.selectedAgent.id !== agent.id) {
+                return;
+            }
+            fetchHostInfo(agent, { showLoading: false });
+        }, 15000);
+    }
+
+    async function fetchHostInfo(agent, options = {}) {
+        const { showLoading = true } = options;
+
+        if (!hostInfoSection || !hostInfoPlaceholder) {
+            return;
+        }
+
+        if (!agent) {
+            const message = state.agents.length
+                ? 'Select a hypervisor to view system metrics.'
+                : 'Register a hypervisor to monitor its performance metrics.';
+            showHostInfoPlaceholder(message, 'Idle');
+            return;
+        }
+
+        if (!state.endpoints.host_info) {
+            showHostInfoError('Host diagnostics endpoint is not available.');
+            return;
+        }
+
+        if (showLoading) {
+            setHostInfoLoading(agent);
+        }
+
+        try {
+            clearHostInfoTimer();
+            const url = buildUrl(state.endpoints.host_info, agent.id);
+            const response = await fetch(url, { credentials: 'same-origin' });
+            const payload = await response.json();
+            if (payload.status !== 'ok') {
+                throw new Error(payload.message || 'Unable to retrieve host diagnostics.');
+            }
+            if (!state.selectedAgent || state.selectedAgent.id !== agent.id) {
+                return;
+            }
+            renderHostInfo(payload);
+            scheduleHostInfoRefresh(agent);
+        } catch (error) {
+            showHostInfoError(error.message || 'Unable to retrieve host diagnostics.');
+        }
     }
 
     function renderAgents() {
@@ -386,6 +719,7 @@
         updateAgentLabel(agent);
         updateSshSection(agent);
         fetchVms(agent);
+        fetchHostInfo(agent);
     }
 
     renderAgents();
@@ -393,8 +727,13 @@
     updateSshSection(state.selectedAgent);
     if (state.selectedAgent) {
         fetchVms(state.selectedAgent);
+        fetchHostInfo(state.selectedAgent);
     } else if (state.agents.length) {
         setVmStatus('Select a hypervisor to load its virtual machines.');
+        showHostInfoPlaceholder('Select a hypervisor to view system metrics.');
+    } else {
+        setVmStatus('Register a hypervisor to view its virtual machines.');
+        showHostInfoPlaceholder('Register a hypervisor to monitor its performance metrics.');
     }
 })();
 </script>

@@ -46,7 +46,8 @@ curl -X POST "$API_BASE_URL/agents" \
 </code></pre>
 
     <p class="muted">Replace the placeholder values with your environment. Cloudflare (or another
-    reverse proxy) should route <code>api.playrservers.com</code> traffic to this service's <code>/api</code> mount.</p>
+    reverse proxy) should route <code>api.playrservers.com</code> traffic to the dedicated API listener (configured via
+    <code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).</p>
 
     <form method="post" action="{{ request.url_for('rotate_api_key') }}" style="margin-top: 2rem;">
         <button type="submit" class="button">Rotate API key</button>

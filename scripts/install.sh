@@ -13,8 +13,11 @@ APP_REPO="${APP_REPO:-}"
 APP_BRANCH="${APP_BRANCH:-main}"
 APP_PORT="${APP_PORT:-8000}"
 APP_HOST="${APP_HOST:-127.0.0.1}"
+APP_API_PORT="${APP_API_PORT:-8001}"
+APP_API_HOST="${APP_API_HOST:-$APP_HOST}"
 SERVICE_NAME="${SERVICE_NAME:-manage-playrservers}"
 APP_DOMAIN="${APP_DOMAIN:-manage.playrservers.com}"
+API_DOMAIN="${API_DOMAIN:-api.playrservers.com}"
 INSTALL_NGINX="${INSTALL_NGINX:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 ENV_FILE="${APP_ENV_FILE:-/etc/manage-playrservers.env}"
@@ -69,6 +72,8 @@ User=${APP_USER}
 Group=${APP_GROUP}
 Environment=MANAGEMENT_PORT=${APP_PORT}
 Environment=MANAGEMENT_HOST=${APP_HOST}
+Environment=MANAGEMENT_API_PORT=${APP_API_PORT}
+Environment=MANAGEMENT_API_HOST=${APP_API_HOST}
 EnvironmentFile=-${ENV_FILE}
 WorkingDirectory=${APP_DIR}
 ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/main.py
@@ -93,14 +98,14 @@ if [[ ! -f "$ENV_FILE" ]]; then
 # Set MANAGEMENT_DB_PATH if you want to move the SQLite database.
 # Example:
 # MANAGEMENT_DB_PATH=/var/lib/manage-playrservers/management.sqlite3
-MANAGEMENT_PUBLIC_API_URL=https://api.playrservers.com
+MANAGEMENT_PUBLIC_API_URL=https://${API_DOMAIN}
 MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}
 EOF
     chown "$APP_USER:$APP_GROUP" "$ENV_FILE"
     chmod 640 "$ENV_FILE"
 else
     if ! grep -q '^MANAGEMENT_PUBLIC_API_URL=' "$ENV_FILE"; then
-        echo 'MANAGEMENT_PUBLIC_API_URL=https://api.playrservers.com' >> "$ENV_FILE"
+        echo "MANAGEMENT_PUBLIC_API_URL=https://${API_DOMAIN}" >> "$ENV_FILE"
     fi
     if ! grep -q '^MANAGEMENT_SESSION_SECRET=' "$ENV_FILE"; then
         SESSION_SECRET=$(generate_secret)
@@ -126,6 +131,19 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
+
+server {
+    listen 80;
+    server_name ${API_DOMAIN};
+
+    location / {
+        proxy_pass http://${APP_API_HOST}:${APP_API_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
 EOF
     ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/${SERVICE_NAME}.conf"
     if [[ -f /etc/nginx/sites-enabled/default ]]; then
@@ -137,7 +155,9 @@ fi
 
 cat <<EOF
 Installation complete.
-The combined management and API service is running as ${SERVICE_NAME} and listening on http://${APP_HOST}:${APP_PORT}.
-Expose https://${APP_DOMAIN} for the operator UI and forward https://api.playrservers.com to http://${APP_HOST}:${APP_PORT}/api via Cloudflare or nginx.
+The management services are running as ${SERVICE_NAME}.
+- Management UI: http://${APP_HOST}:${APP_PORT}
+- API endpoint: http://${APP_API_HOST}:${APP_API_PORT}
+Expose https://${APP_DOMAIN} for the operator UI and forward https://${API_DOMAIN} to http://${APP_API_HOST}:${APP_API_PORT} via Cloudflare or nginx.
 Remember to provision TLS certificates for both hostnames.
 EOF

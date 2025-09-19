@@ -12,7 +12,7 @@ os.environ.setdefault("MANAGEMENT_SESSION_SECRET", "tests-secret-key")
 
 from app.database import Database
 from app.management import create_app
-from app.ssh import CommandResult
+from app.ssh import CommandResult, HostKeyVerificationError
 
 
 EMAIL = "host@example.com"
@@ -107,3 +107,106 @@ def test_host_info_endpoint_returns_metrics(tmp_path):
         ["cat", "/proc/loadavg"],
         ["free", "-b"],
     ]
+
+
+def test_host_info_endpoint_reports_host_key_error(tmp_path):
+    database = Database(tmp_path / "management.sqlite3")
+    database.initialize()
+    user, _ = database.create_user("Observer", EMAIL, PASSWORD)
+    agent = database.create_agent(
+        user.id,
+        name="hypervisor-01",
+        hostname="hv.internal",
+        port=22,
+        username="qemu",
+        private_key="dummy-key",
+        private_key_passphrase=None,
+        allow_unknown_hosts=False,
+        known_hosts_path=None,
+    )
+
+    app = create_app(
+        database=database,
+        session_secret="tests-secret",
+        api_base_url="https://example.com",
+    )
+
+    class FailingRunner:
+        def run(self, _args, _timeout: int = 60) -> CommandResult:
+            raise HostKeyVerificationError(
+                agent.hostname,
+                port=agent.port,
+                suggestion=(
+                    "Add the host to the configured known hosts file or enable "
+                    '"Allow unknown host keys" for this hypervisor.'
+                ),
+            )
+
+    def runner_factory(requested_agent):
+        assert requested_agent.id == agent.id
+        return FailingRunner()
+
+    app.state.ssh_runner_factory = runner_factory
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/login",
+            data={"email": EMAIL, "password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        response = client.get(f"/management/agents/{agent.id}/host-info")
+        assert response.status_code == 502
+
+    payload = response.json()
+    assert payload["status"] == "error"
+    assert payload["code"] == "host_key_verification_failed"
+    assert payload["hostname"] == agent.hostname
+    assert payload["port"] == agent.port
+    assert "Allow unknown host keys" in payload["message"]
+
+
+def test_allow_unknown_hosts_endpoint_updates_agent(tmp_path):
+    database = Database(tmp_path / "management.sqlite3")
+    database.initialize()
+    user, _ = database.create_user("Observer", EMAIL, PASSWORD)
+    agent = database.create_agent(
+        user.id,
+        name="hypervisor-01",
+        hostname="hv.internal",
+        port=22,
+        username="qemu",
+        private_key="dummy-key",
+        private_key_passphrase=None,
+        allow_unknown_hosts=False,
+        known_hosts_path=None,
+    )
+
+    app = create_app(
+        database=database,
+        session_secret="tests-secret",
+        api_base_url="https://example.com",
+    )
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/login",
+            data={"email": EMAIL, "password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        response = client.post(
+            f"/management/agents/{agent.id}/allow-unknown-hosts",
+            follow_redirects=False,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "ok"
+        assert payload["agent"]["id"] == agent.id
+        assert payload["agent"]["allow_unknown_hosts"] is True
+
+    updated = database.get_agent_for_user(user.id, agent.id)
+    assert updated is not None
+    assert updated.allow_unknown_hosts is True

@@ -18,7 +18,13 @@ from starlette.websockets import WebSocketState
 from .database import Database, resolve_database_path
 from .models import Agent, User
 from .qemu import QEMUError, QEMUManager
-from .ssh import SSHClientFactory, SSHCommandRunner, SSHTarget, SSHError
+from .ssh import (
+    HostKeyVerificationError,
+    SSHClientFactory,
+    SSHCommandRunner,
+    SSHTarget,
+    SSHError,
+)
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -500,6 +506,9 @@ def create_app(
             "ssh_terminal": str(
                 request.url_for("management_agent_terminal", agent_id=0)
             ),
+            "allow_unknown_hosts": str(
+                request.url_for("management_allow_unknown_hosts", agent_id=0)
+            ),
         }
 
         return templates.TemplateResponse(
@@ -726,6 +735,17 @@ def create_app(
         manager = _build_qemu_manager(agent)
         try:
             vms = manager.list_vms()
+        except HostKeyVerificationError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "status": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                    "hostname": exc.hostname,
+                    "port": exc.port or agent.port,
+                },
+            )
         except (QEMUError, SSHError) as exc:
             return JSONResponse(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -755,6 +775,17 @@ def create_app(
         manager = _build_qemu_manager(agent)
         try:
             result = manager.get_vm_info(vm_name)
+        except HostKeyVerificationError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "status": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                    "hostname": exc.hostname,
+                    "port": exc.port or agent.port,
+                },
+            )
         except (QEMUError, SSHError) as exc:
             return JSONResponse(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -795,6 +826,17 @@ def create_app(
 
         try:
             result = operation(vm_name)
+        except HostKeyVerificationError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "status": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                    "hostname": exc.hostname,
+                    "port": exc.port or agent.port,
+                },
+            )
         except (QEMUError, SSHError) as exc:
             return JSONResponse(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -830,6 +872,15 @@ def create_app(
                     {"type": "status", "status": "connected"},
                 )
                 await _stream_ssh_channel(websocket, channel)
+        except HostKeyVerificationError as exc:
+            await _send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                },
+            )
         except (SSHError, RuntimeError) as exc:
             await _send_websocket_json(websocket, {"type": "error", "message": str(exc)})
         except Exception:
@@ -845,6 +896,50 @@ def create_app(
                 with suppress(Exception):
                     await websocket.close()
 
+    @app.post(
+        "/management/agents/{agent_id}/allow-unknown-hosts",
+        name="management_allow_unknown_hosts",
+    )
+    async def management_allow_unknown_hosts(request: Request, agent_id: int):
+        user = _get_current_user(request)
+        if user is None:
+            return _json_auth_error()
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            return _json_agent_missing()
+
+        if agent.allow_unknown_hosts:
+            return JSONResponse(
+                content={
+                    "status": "ok",
+                    "message": "Unknown host keys are already allowed for this hypervisor.",
+                    "agent": _agent_to_view(agent),
+                }
+            )
+
+        updated = database.update_agent(
+            user.id,
+            agent_id,
+            allow_unknown_hosts=True,
+        )
+        if updated is None:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "status": "error",
+                    "message": "Failed to update hypervisor settings.",
+                },
+            )
+
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "message": "Unknown host keys will now be accepted for this hypervisor.",
+                "agent": _agent_to_view(updated),
+            }
+        )
+
     @app.get("/management/agents/{agent_id}/host-info")
     async def management_host_info(request: Request, agent_id: int):
         user = _get_current_user(request)
@@ -859,6 +954,17 @@ def create_app(
 
         try:
             nodeinfo_result = runner.run(["virsh", "nodeinfo"])
+        except HostKeyVerificationError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "status": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                    "hostname": exc.hostname,
+                    "port": exc.port or agent.port,
+                },
+            )
         except SSHError as exc:
             return JSONResponse(
                 status_code=status.HTTP_502_BAD_GATEWAY,

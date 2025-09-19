@@ -16,6 +16,22 @@ class SSHError(RuntimeError):
     """Raised when an SSH operation fails."""
 
 
+class HostKeyVerificationError(SSHError):
+    """Raised when host key verification fails for a remote host."""
+
+    def __init__(self, hostname: str, *, port: int | None = None, suggestion: str | None = None) -> None:
+        base = f"Host key verification failed for {hostname}"
+        if port is not None:
+            base += f":{port}"
+        base += "."
+        if suggestion:
+            base = f"{base} {suggestion}".strip()
+        super().__init__(base)
+        self.hostname = hostname
+        self.port = port
+        self.suggestion = suggestion
+
+
 @dataclass
 class CommandResult:
     """Result of an executed SSH command."""
@@ -110,11 +126,15 @@ class SSHClientFactory:
         except paramiko.AuthenticationException as exc:
             raise SSHError("Authentication with the remote host failed") from exc
         except paramiko.BadHostKeyException as exc:
-            message = (
-                "Host key verification failed for "
-                f"{exc.hostname}."
+            suggestion = (
+                "The host key differs from the entry stored in the known hosts file. "
+                "Update the stored key or enable \"Allow unknown host keys\" for this hypervisor."
             )
-            raise SSHError(message) from exc
+            raise HostKeyVerificationError(
+                exc.hostname,
+                port=self._target.port,
+                suggestion=suggestion,
+            ) from exc
         except paramiko.SSHException as exc:
             message = str(exc)
             if "not found in known_hosts" in message:
@@ -124,7 +144,11 @@ class SSHClientFactory:
                     "Add the host to the configured known hosts file or enable "
                     '"Allow unknown host keys" for this hypervisor.'
                 )
-                raise SSHError(suggestion.format(host=host)) from exc
+                raise HostKeyVerificationError(
+                    host,
+                    port=self._target.port,
+                    suggestion=suggestion.format(host=host),
+                ) from exc
             raise SSHError(f"SSH connection failed: {message}") from exc
         finally:
             client.close()
@@ -174,4 +198,11 @@ class SSHCommandRunner:
         return CommandResult(command=args, exit_status=exit_status, stdout=stdout_text, stderr=stderr_text)
 
 
-__all__ = ["SSHError", "CommandResult", "SSHTarget", "SSHClientFactory", "SSHCommandRunner"]
+__all__ = [
+    "SSHError",
+    "HostKeyVerificationError",
+    "CommandResult",
+    "SSHTarget",
+    "SSHClientFactory",
+    "SSHCommandRunner",
+]

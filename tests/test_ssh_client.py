@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("MANAGEMENT_SESSION_SECRET", "tests-secret-key")
 
 from app import ssh as ssh_module
-from app.ssh import SSHClientFactory, SSHTarget, SSHError
+from app.ssh import HostKeyVerificationError, SSHClientFactory, SSHTarget, SSHError
 
 
 class DummyChannel:
@@ -57,11 +57,12 @@ def test_connect_unknown_host_error(monkeypatch):
     monkeypatch.setattr(paramiko, "SSHClient", DummyClient)
     monkeypatch.setattr(ssh_module, "_load_private_key", lambda _key, _passphrase: object())
 
-    with pytest.raises(SSHError) as excinfo:
+    with pytest.raises(HostKeyVerificationError) as excinfo:
         with factory.connect():
             pass
 
     assert "Add the host to the configured known hosts file" in str(excinfo.value)
+    assert excinfo.value.hostname == "example.com"
 
 
 def test_open_shell_propagates_error(monkeypatch):

@@ -721,6 +721,17 @@
         });
     }
 
+    function resetHostInfoMessage() {
+        if (!hostInfoMessage) {
+            return;
+        }
+        while (hostInfoMessage.firstChild) {
+            hostInfoMessage.removeChild(hostInfoMessage.firstChild);
+        }
+        hostInfoMessage.className = 'notice';
+        hostInfoMessage.style.display = 'none';
+    }
+
     function setHostInfoBadge(text) {
         if (hostInfoTimestamp) {
             hostInfoTimestamp.textContent = text;
@@ -736,11 +747,7 @@
         hostInfoPlaceholder.textContent = message;
         hostInfoPlaceholder.style.display = '';
         hostInfoSection.style.display = 'none';
-        if (hostInfoMessage) {
-            hostInfoMessage.textContent = '';
-            hostInfoMessage.className = 'notice';
-            hostInfoMessage.style.display = 'none';
-        }
+        resetHostInfoMessage();
         setHostInfoBadge(badgeText);
     }
 
@@ -753,15 +760,11 @@
         hostInfoPlaceholder.textContent = `Collecting host diagnostics from ${agent.name}…`;
         hostInfoPlaceholder.style.display = '';
         hostInfoSection.style.display = 'none';
-        if (hostInfoMessage) {
-            hostInfoMessage.textContent = '';
-            hostInfoMessage.className = 'notice';
-            hostInfoMessage.style.display = 'none';
-        }
+        resetHostInfoMessage();
         setHostInfoBadge('Loading…');
     }
 
-    function showHostInfoError(message) {
+    function showHostInfoError(message, options = {}) {
         if (!hostInfoSection || !hostInfoPlaceholder) {
             return;
         }
@@ -770,8 +773,51 @@
         hostInfoSection.style.display = '';
         hostInfoPlaceholder.style.display = 'none';
         if (hostInfoMessage) {
-            hostInfoMessage.textContent = message;
+            resetHostInfoMessage();
             hostInfoMessage.className = 'notice danger';
+            const paragraph = document.createElement('p');
+            paragraph.textContent = message;
+            hostInfoMessage.appendChild(paragraph);
+
+            const { actionLabel, actionDescription, actionVariant, onAction } = options || {};
+            if (actionLabel && typeof onAction === 'function') {
+                const actions = document.createElement('div');
+                actions.style.marginTop = '0.75rem';
+                const button = document.createElement('button');
+                button.type = 'button';
+                let classes = 'button small';
+                if (actionVariant) {
+                    classes += ` ${actionVariant}`;
+                } else {
+                    classes += ' secondary';
+                }
+                button.className = classes;
+                button.textContent = actionLabel;
+                button.addEventListener('click', () => {
+                    if (button.hasAttribute('disabled')) {
+                        return;
+                    }
+                    const result = onAction();
+                    if (result && typeof result.finally === 'function') {
+                        button.setAttribute('disabled', 'true');
+                        result.finally(() => {
+                            button.removeAttribute('disabled');
+                        });
+                    }
+                });
+                actions.appendChild(button);
+
+                if (actionDescription) {
+                    const helper = document.createElement('p');
+                    helper.className = 'muted';
+                    helper.style.marginTop = '0.5rem';
+                    helper.textContent = actionDescription;
+                    actions.appendChild(helper);
+                }
+
+                hostInfoMessage.appendChild(actions);
+            }
+
             hostInfoMessage.style.display = '';
         }
         setHostInfoBadge('Error');
@@ -789,14 +835,13 @@
         hostInfoSection.style.display = '';
 
         if (hostInfoMessage) {
+            resetHostInfoMessage();
             if (Array.isArray(payload.warnings) && payload.warnings.length) {
-                hostInfoMessage.textContent = payload.warnings.join(' ');
                 hostInfoMessage.className = 'notice warning';
+                const warning = document.createElement('p');
+                warning.textContent = payload.warnings.join(' ');
+                hostInfoMessage.appendChild(warning);
                 hostInfoMessage.style.display = '';
-            } else {
-                hostInfoMessage.textContent = '';
-                hostInfoMessage.className = 'notice';
-                hostInfoMessage.style.display = 'none';
             }
         }
 
@@ -864,6 +909,57 @@
         }, 15000);
     }
 
+    async function allowUnknownHostKeys(agentId) {
+        if (!state.endpoints.allow_unknown_hosts) {
+            return false;
+        }
+        const agent = state.agents.find((item) => item.id === agentId);
+        if (!agent) {
+            return false;
+        }
+        if (agent.allow_unknown_hosts) {
+            return true;
+        }
+        if (!state.selectedAgent || state.selectedAgent.id !== agentId) {
+            return false;
+        }
+
+        setHostInfoLoading(agent);
+
+        try {
+            const url = buildUrl(state.endpoints.allow_unknown_hosts, agentId);
+            const response = await fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+            });
+            const payload = await response.json();
+            if (!response.ok || payload.status !== 'ok' || !payload.agent) {
+                throw new Error(payload.message || 'Failed to update hypervisor settings.');
+            }
+
+            const updatedAgent = payload.agent;
+            state.agents = state.agents.map((item) => (
+                item.id === updatedAgent.id ? updatedAgent : item
+            ));
+            state.selectedAgent = updatedAgent;
+            renderAgents();
+            updateAgentLabel(updatedAgent);
+            updateSshSection(updatedAgent);
+
+            await fetchVms(updatedAgent);
+            await fetchHostInfo(updatedAgent, { showLoading: true });
+            return true;
+        } catch (error) {
+            const message = (error && error.message) || 'Failed to update hypervisor settings.';
+            showHostInfoError(message, {
+                actionLabel: 'Allow unknown host keys',
+                actionDescription: 'Trust this hypervisor and retry the connection.',
+                onAction: () => allowUnknownHostKeys(agentId),
+            });
+            return false;
+        }
+    }
+
     async function fetchHostInfo(agent, options = {}) {
         const { showLoading = true } = options;
 
@@ -893,8 +989,11 @@
             const url = buildUrl(state.endpoints.host_info, agent.id);
             const response = await fetch(url, { credentials: 'same-origin' });
             const payload = await response.json();
-            if (payload.status !== 'ok') {
-                throw new Error(payload.message || 'Unable to retrieve host diagnostics.');
+            if (!response.ok || payload.status !== 'ok') {
+                const error = new Error(payload.message || 'Unable to retrieve host diagnostics.');
+                error.details = payload;
+                error.status = response.status;
+                throw error;
             }
             if (!state.selectedAgent || state.selectedAgent.id !== agent.id) {
                 return;
@@ -902,7 +1001,23 @@
             renderHostInfo(payload);
             scheduleHostInfoRefresh(agent);
         } catch (error) {
-            showHostInfoError(error.message || 'Unable to retrieve host diagnostics.');
+            const message = (error && error.message) || 'Unable to retrieve host diagnostics.';
+            let options;
+            if (
+                agent &&
+                !agent.allow_unknown_hosts &&
+                state.endpoints.allow_unknown_hosts &&
+                error &&
+                error.details &&
+                error.details.code === 'host_key_verification_failed'
+            ) {
+                options = {
+                    actionLabel: 'Allow unknown host keys',
+                    actionDescription: 'Trust this hypervisor and retry the connection.',
+                    onAction: () => allowUnknownHostKeys(agent.id),
+                };
+            }
+            showHostInfoError(message, options);
         }
     }
 

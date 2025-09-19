@@ -57,11 +57,15 @@ def create_app(
     app.state.database = database
     app.state.public_api_url = api_base_url
 
-    secure_cookie = os.getenv("MANAGEMENT_SESSION_SECURE", "true").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-    }
+    secure_cookie_setting = os.getenv("MANAGEMENT_SESSION_SECURE")
+    if secure_cookie_setting is None:
+        secure_cookie = False
+    else:
+        secure_cookie = secure_cookie_setting.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
 
     app.add_middleware(
         SessionMiddleware,

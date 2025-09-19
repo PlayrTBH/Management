@@ -14,8 +14,6 @@ from .agent_registration import (
     AgentProvisioningError,
     AgentProvisioningSettings,
     load_agent_provisioning_settings,
-    load_authorized_keys,
-    load_private_key,
 )
 from .database import Database, resolve_database_path
 from .models import Agent, User
@@ -256,9 +254,10 @@ def create_app(
     @app.get("/v1/account/profile", response_model=AccountProfileResponse)
     async def read_account_profile(
         current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
     ) -> AccountProfileResponse:
         try:
-            authorized_keys = load_authorized_keys(agent_settings)
+            key_pair = db.ensure_user_provisioning_keys(current_user.id)
         except AgentProvisioningError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -267,7 +266,7 @@ def create_app(
 
         return AccountProfileResponse(
             username=agent_settings.username,
-            authorized_keys=authorized_keys,
+            authorized_keys=[key_pair.public_key],
         )
 
     @app.post("/users/me/api-key/rotate", response_model=RotateAPIKeyResponse)
@@ -326,13 +325,15 @@ def create_app(
         resolved_username = configured_username or payload.username
 
         try:
-            private_key = load_private_key(agent_settings)
-            authorized_keys = load_authorized_keys(agent_settings)
+            key_pair = db.ensure_user_provisioning_keys(current_user.id)
         except AgentProvisioningError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=str(exc),
             ) from exc
+
+        private_key = key_pair.private_key
+        authorized_keys = [key_pair.public_key]
 
         existing = db.find_agent_by_hostname(current_user.id, hostname)
         if existing is None and name:

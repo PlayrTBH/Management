@@ -16,7 +16,8 @@ try:  # pragma: no cover - exercised indirectly via tests
 except ModuleNotFoundError:  # pragma: no cover - explicitly tested below
     CryptContext = None  # type: ignore[assignment]
 
-from .models import Agent, User
+from .agent_registration import AgentProvisioningError, generate_provisioning_key_pair
+from .models import Agent, ProvisioningKeyPair, User
 
 
 def _ensure_directory(path: Path) -> None:
@@ -143,6 +144,13 @@ class Database:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS user_provisioning_keys (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    private_key TEXT NOT NULL,
+                    public_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
                 CREATE INDEX IF NOT EXISTS idx_users_api_key_prefix ON users(api_key_prefix);
                 """
@@ -198,6 +206,10 @@ class Database:
                 raise ValueError("A user with that email already exists") from exc
 
             user_id = cursor.lastrowid
+
+        # Provisioning keys are generated lazily when the user is created so that
+        # automation clients can enrol agents immediately.
+        self.ensure_user_provisioning_keys(user_id)
 
         user = User(id=user_id, name=name, email=normalized_email, api_key_prefix=prefix, created_at=created_at)
         return user, api_key
@@ -334,6 +346,58 @@ class Database:
         if refreshed is None:
             raise ValueError("User not found")
         return refreshed, api_key
+
+    # ------------------------------------------------------------------
+    # Provisioning key management
+    # ------------------------------------------------------------------
+    def get_user_provisioning_keys(self, user_id: int) -> Optional[ProvisioningKeyPair]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_provisioning_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_provisioning_keys(row)
+
+    def ensure_user_provisioning_keys(self, user_id: int) -> ProvisioningKeyPair:
+        existing = self.get_user_provisioning_keys(user_id)
+        if existing is not None:
+            return existing
+
+        private_key, public_key = generate_provisioning_key_pair()
+        created_at = _current_timestamp()
+        serialized_created = _serialize_datetime(created_at)
+
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_provisioning_keys (user_id, private_key, public_key, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user_id, private_key, public_key, serialized_created),
+                )
+        except sqlite3.IntegrityError:
+            existing = self.get_user_provisioning_keys(user_id)
+            if existing is not None:
+                return existing
+            raise AgentProvisioningError(
+                f"Provisioning keys already exist for user {user_id} but could not be loaded"
+            )
+        except sqlite3.DatabaseError as exc:  # pragma: no cover - unexpected database failure
+            raise AgentProvisioningError(
+                f"Failed to persist provisioning key material for user {user_id}"
+            ) from exc
+
+        return ProvisioningKeyPair(
+            user_id=user_id,
+            private_key=private_key,
+            public_key=public_key,
+            created_at=created_at,
+        )
 
     # ------------------------------------------------------------------
     # Agent management
@@ -499,6 +563,14 @@ class Database:
             private_key_passphrase=row["private_key_passphrase"],
             allow_unknown_hosts=bool(row["allow_unknown_hosts"]),
             known_hosts_path=row["known_hosts_path"],
+            created_at=_parse_datetime(str(row["created_at"])),
+        )
+
+    def _row_to_provisioning_keys(self, row: sqlite3.Row) -> ProvisioningKeyPair:
+        return ProvisioningKeyPair(
+            user_id=int(row["user_id"]),
+            private_key=str(row["private_key"]),
+            public_key=str(row["public_key"]),
             created_at=_parse_datetime(str(row["created_at"])),
         )
 

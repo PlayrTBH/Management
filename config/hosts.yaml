@@ -1,0 +1,9 @@
+# Example host configuration. Replace with your real virtualization hosts.
+hosts:
+  - name: "example"
+    hostname: "127.0.0.1"
+    port: 22
+    username: "qemu"
+    private_key_path: "../keys/example_id_ed25519"
+    allow_unknown_hosts: false
+    # known_hosts_file: "/etc/ssh/ssh_known_hosts"

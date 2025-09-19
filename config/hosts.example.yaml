@@ -1,0 +1,10 @@
+# Copy this file to a secure location and update the values with your environment.
+# Set the MANAGEMENT_CONFIG_PATH environment variable to point at the customized file.
+hosts:
+  - name: "production"
+    hostname: "qemu1.internal"
+    port: 22
+    username: "qemu-admin"
+    private_key_path: "/srv/keys/qemu_admin_ed25519"
+    allow_unknown_hosts: false
+    known_hosts_file: "/etc/ssh/ssh_known_hosts"

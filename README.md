@@ -1,4 +1,4 @@
-# PlayrServers QEMU Management Portal
+# PlayrServers QEMU Management Portal (Assume this is garbage, do not use)
 
 A hardened FastAPI application that exposes both a password-protected operator
 portal and a machine-to-machine API for orchestrating remote QEMU/KVM

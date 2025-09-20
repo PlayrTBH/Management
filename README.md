@@ -26,6 +26,8 @@ infrastructure is maintained separately by the platform team.
   including hostnames, SSH ports, and host verification preferences.
 - 🧠 **VM lifecycle API** – trigger `start`, `shutdown`, `destroy`, `reboot`, or
   `dominfo` via secure HTTP calls.
+- 🧰 **Guided VM deployments** – bootstrap Ubuntu 24.04 LTS and Windows Server
+  2022 guests remotely, complete with default automation credentials.
 - 🗄️ **SQLite persistence** – all profiles, agents, and keys are stored locally
   in `data/management.sqlite3` by default.
 
@@ -129,6 +131,37 @@ exposes three primary workflows:
 
 Session cookies are signed with `MANAGEMENT_SESSION_SECRET` and marked
 `Secure`/`SameSite=Lax` so they are only transmitted over HTTPS.
+
+## Guided VM deployments
+
+With at least one hypervisor agent registered, the management dashboard can
+bootstrap new guests end-to-end from the **Deploy a virtual machine** panel.
+Select an operating system profile, adjust sizing, and the portal will download
+the installer, prepare cloud-init or unattended media, and run `virt-install`
+over SSH. The UI highlights the default credentials so operators can hand off
+access immediately after provisioning.
+
+### Supported profiles
+
+- **Ubuntu Server 24.04 LTS** – streams the official cloud image from
+  [ubuntu.com](https://ubuntu.com/download/server), seeds a `playradmin` account
+  via cloud-init, and defaults to 4 GiB RAM, 2 vCPUs, and a 40 GiB disk.
+- **Windows Server 2022 Datacenter (Evaluation)** – downloads the Microsoft
+  evaluation ISO, generates an `Autounattend.xml`, and mounts it alongside the
+  installer. A `playradmin` administrator account is created with the
+  pre-configured password `PlayrServers!23`.
+
+> **Note:** Windows automation requires an ISO authoring utility (`genisoimage`,
+> `mkisofs`, or `xorrisofs`) to be present on the hypervisor so the unattended
+> media can be generated. The evaluation ISO is subject to Microsoft's licensing
+> terms and expires unless activated.
+
+## Browser-based VM console
+
+Each VM entry now includes a **Console** button that opens a streaming `virsh
+console` session directly in the browser. Connections use the same stored SSH
+credentials as other agent workflows and can be released with <kbd>Ctrl</kbd> +
+<kbd>]</kbd>.
 
 ## API Overview
 

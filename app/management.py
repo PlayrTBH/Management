@@ -1,8 +1,10 @@
 """Browser-based management interface for the PlayrServers control plane."""
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import shlex
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +19,12 @@ from starlette.websockets import WebSocketState
 
 from .database import Database, resolve_database_path
 from .models import Agent, User
-from .qemu import QEMUError, QEMUManager
+from .qemu import (
+    QEMUError,
+    QEMUManager,
+    get_vm_deployment_profile,
+    get_vm_deployment_profiles,
+)
 from .ssh import (
     HostKeyVerificationError,
     SSHClientFactory,
@@ -175,6 +182,13 @@ def create_app(
         return factory.open_shell()
 
     def _build_qemu_manager(agent: Agent) -> QEMUManager:
+        override = getattr(app.state, "qemu_manager_factory", None)
+        if callable(override):
+            manager = override(agent)
+            if manager is None:
+                raise RuntimeError("QEMU manager override must return a manager instance")
+            return manager
+
         runner = _build_ssh_runner(agent)
         return QEMUManager(runner)
 
@@ -509,7 +523,19 @@ def create_app(
             "allow_unknown_hosts": str(
                 request.url_for("management_allow_unknown_hosts", agent_id=0)
             ),
+            "deploy_vm": str(
+                request.url_for("management_deploy_vm", agent_id=0)
+            ),
+            "vm_console": str(
+                request.url_for(
+                    "management_vm_console", agent_id=0, vm_name="__VM__"
+                )
+            ),
         }
+
+        deployment_profiles = [
+            profile.to_public_dict() for profile in get_vm_deployment_profiles()
+        ]
 
         return templates.TemplateResponse(
             "management.html",
@@ -520,6 +546,7 @@ def create_app(
                 "selected_agent": selected_agent,
                 "messages": messages,
                 "endpoints": endpoints,
+                "deployment_profiles": deployment_profiles,
             },
         )
 
@@ -635,8 +662,27 @@ def create_app(
         with suppress(Exception):
             await websocket.send_json(payload)
 
-    async def _stream_ssh_channel(websocket: WebSocket, channel) -> None:
+    async def _stream_ssh_channel(websocket: WebSocket, channel, *, on_close=None) -> None:
         cancel_exc = anyio.get_cancelled_exc_class()
+        closed = False
+
+        async def cleanup() -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            if on_close is not None:
+                try:
+                    result = on_close()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    pass
+            with suppress(Exception):
+                await anyio.to_thread.run_sync(channel.close)
+            with suppress(Exception):
+                if websocket.application_state != WebSocketState.DISCONNECTED:
+                    await websocket.close()
 
         async def pump_ssh_to_websocket(task_group) -> None:
             try:
@@ -658,11 +704,7 @@ def create_app(
                 pass
             finally:
                 task_group.cancel_scope.cancel()
-                with suppress(Exception):
-                    await anyio.to_thread.run_sync(channel.close)
-                with suppress(Exception):
-                    if websocket.application_state != WebSocketState.DISCONNECTED:
-                        await websocket.close()
+                await cleanup()
 
         async def pump_websocket_to_ssh(task_group) -> None:
             try:
@@ -712,11 +754,7 @@ def create_app(
                 pass
             finally:
                 task_group.cancel_scope.cancel()
-                with suppress(Exception):
-                    await anyio.to_thread.run_sync(channel.close)
-                with suppress(Exception):
-                    if websocket.application_state != WebSocketState.DISCONNECTED:
-                        await websocket.close()
+                await cleanup()
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(pump_ssh_to_websocket, task_group)
@@ -851,6 +889,115 @@ def create_app(
             }
         )
 
+    @app.post("/management/agents/{agent_id}/deployments", name="management_deploy_vm")
+    async def management_deploy_vm(request: Request, agent_id: int):
+        user = _get_current_user(request)
+        if user is None:
+            return _json_auth_error()
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            return _json_agent_missing()
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": "Invalid JSON payload."},
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": "Invalid request payload."},
+            )
+
+        profile_id = str(payload.get("profile_id") or "").strip()
+        vm_name = str(payload.get("vm_name") or "").strip()
+        memory_mb = payload.get("memory_mb")
+        vcpus = payload.get("vcpus")
+        disk_gb = payload.get("disk_gb")
+
+        profile = get_vm_deployment_profile(profile_id)
+        if profile is None:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": "Unknown deployment profile."},
+            )
+
+        manager = _build_qemu_manager(agent)
+
+        try:
+            result = manager.deploy_vm(
+                profile.id,
+                vm_name,
+                memory_mb=memory_mb,
+                vcpus=vcpus,
+                disk_gb=disk_gb,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
+            )
+        except HostKeyVerificationError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content={
+                    "status": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                    "hostname": exc.hostname,
+                    "port": exc.port or agent.port,
+                },
+            )
+        except QEMUError as exc:
+            error_payload: Dict[str, object] = {"status": "error", "message": str(exc)}
+            if getattr(exc, "result", None) is not None:
+                error_payload["result"] = _command_result_payload(exc.result)
+            return JSONResponse(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                content=error_payload,
+            )
+
+        def _resolve(value, default):
+            if value is None:
+                return default
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return default
+                value = stripped
+            return int(value)
+
+        try:
+            resolved_memory = _resolve(memory_mb, profile.default_memory_mb)
+            resolved_vcpus = _resolve(vcpus, profile.default_vcpus)
+            resolved_disk = _resolve(disk_gb, profile.default_disk_gb)
+        except (TypeError, ValueError):
+            resolved_memory = profile.default_memory_mb
+            resolved_vcpus = profile.default_vcpus
+            resolved_disk = profile.default_disk_gb
+
+        response_payload = {
+            "status": "ok",
+            "message": f"Deployment for '{vm_name}' started on {agent.name}.",
+            "profile": profile.to_public_dict(),
+            "parameters": {
+                "memory_mb": resolved_memory,
+                "vcpus": resolved_vcpus,
+                "disk_gb": resolved_disk,
+            },
+            "credentials": {
+                "username": profile.default_username,
+                "password": profile.default_password,
+            },
+            "result": _command_result_payload(result),
+        }
+
+        return JSONResponse(content=response_payload)
+
     @app.websocket("/management/agents/{agent_id}/terminal", name="management_agent_terminal")
     async def management_agent_terminal(websocket: WebSocket, agent_id: int):
         user = _get_current_user_from_session(websocket.session)
@@ -889,6 +1036,69 @@ def create_app(
                 {
                     "type": "error",
                     "message": "SSH session terminated unexpectedly.",
+                },
+            )
+        finally:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                with suppress(Exception):
+                    await websocket.close()
+
+    @app.websocket(
+        "/management/agents/{agent_id}/vms/{vm_name}/console",
+        name="management_vm_console",
+    )
+    async def management_vm_console(websocket: WebSocket, agent_id: int, vm_name: str):
+        user = _get_current_user_from_session(websocket.session)
+        if user is None:
+            await websocket.close(code=4401)
+            return
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            await websocket.close(code=4404)
+            return
+
+        cleaned_vm_name = vm_name.strip()
+        if not cleaned_vm_name:
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+
+        try:
+            with _build_ssh_terminal(agent) as channel:
+                command = f"virsh console --force {shlex.quote(cleaned_vm_name)}\n"
+                await anyio.to_thread.run_sync(channel.send, command.encode("utf-8"))
+
+                async def detach_console():
+                    with suppress(Exception):
+                        await anyio.to_thread.run_sync(channel.send, b"\x1d\n")
+                        await anyio.to_thread.run_sync(channel.send, b"exit\n")
+
+                await _send_websocket_json(
+                    websocket,
+                    {"type": "status", "status": "connected", "vm": cleaned_vm_name},
+                )
+                await _stream_ssh_channel(websocket, channel, on_close=detach_console)
+        except HostKeyVerificationError as exc:
+            await _send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                },
+            )
+        except (SSHError, RuntimeError) as exc:
+            await _send_websocket_json(
+                websocket, {"type": "error", "message": str(exc)}
+            )
+        except Exception:
+            await _send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": "Console session terminated unexpectedly.",
                 },
             )
         finally:

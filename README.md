@@ -21,8 +21,28 @@ clean foundation.
 
 ### Automated installation
 
-Run the installer script to install dependencies, initialise the database, and
-create the first user account:
+Fetch and execute the remote installer to provision the management service and
+its dependencies in one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PlayrTBH/Management/main/scripts/install.sh | sudo bash
+```
+
+You can forward flags to the underlying Python installer (for unattended
+setups) by appending them after `--`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PlayrTBH/Management/main/scripts/install.sh \
+  | sudo bash -s -- --admin-name "Service Admin" --admin-email admin@example.com --admin-password "your-strong-password"
+```
+
+Override the default install path or branch via environment variables such as
+`MANAGEMENT_INSTALL_DIR=/srv/management`. These values are documented at the top
+of `scripts/install.sh`.
+
+If you've already cloned the repository locally, run the installer script to
+install dependencies, initialise the database, and create the first user
+account:
 
 ```bash
 python scripts/install_service.py

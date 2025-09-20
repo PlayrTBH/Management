@@ -35,6 +35,17 @@ class Agent:
 
 
 @dataclass(frozen=True)
+class AgentCommand:
+    """Represents a queued command awaiting execution by an agent."""
+
+    id: int
+    user_id: int
+    command: str
+    created_at: datetime
+    dispatched_at: Optional[datetime]
+
+
+@dataclass(frozen=True)
 class ProvisioningKeyPair:
     """Stores SSH key material generated for a user profile."""
 
@@ -43,5 +54,4 @@ class ProvisioningKeyPair:
     public_key: str
     created_at: datetime
 
-
-__all__ = ["Agent", "ProvisioningKeyPair", "User"]
+__all__ = ["Agent", "AgentCommand", "ProvisioningKeyPair", "User"]

@@ -778,6 +778,8 @@ def create_app(
             task_group.start_soon(pump_ssh_to_websocket, task_group)
             task_group.start_soon(pump_websocket_to_ssh, task_group)
 
+        await cleanup()
+
     @app.get("/management/agents/{agent_id}/vms")
     async def management_list_vms(request: Request, agent_id: int):
         user = _get_current_user(request)

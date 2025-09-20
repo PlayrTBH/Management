@@ -132,6 +132,15 @@ class AgentConnectResponse(BaseModel):
     close_other_sessions: bool
 
 
+class AgentCommandPayload(BaseModel):
+    id: int
+    command: str = Field(..., min_length=1)
+
+
+class AgentCommandListResponse(BaseModel):
+    commands: List[AgentCommandPayload]
+
+
 def command_result_to_dict(result: CommandResult) -> Dict[str, object]:
     return {
         "command": list(result.command),
@@ -369,6 +378,25 @@ def create_app(
             username=agent.username,
             authorized_keys=authorized_keys,
             close_other_sessions=agent_settings.close_other_sessions,
+        )
+
+    @protected_router.get(
+        "/v1/servers/commands",
+        response_model=AgentCommandListResponse,
+    )
+    async def fetch_pending_commands(
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> AgentCommandListResponse:
+        commands = db.list_pending_agent_commands(current_user.id)
+        command_ids = [command.id for command in commands]
+        if command_ids:
+            db.mark_agent_commands_dispatched(current_user.id, command_ids)
+        return AgentCommandListResponse(
+            commands=[
+                AgentCommandPayload(id=command.id, command=command.command)
+                for command in commands
+            ]
         )
 
     @protected_router.patch("/agents/{agent_id}", response_model=AgentResponse)

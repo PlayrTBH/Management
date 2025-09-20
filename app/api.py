@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from .agent_registration import (
@@ -139,6 +139,37 @@ class AgentCommandPayload(BaseModel):
 
 class AgentCommandListResponse(BaseModel):
     commands: List[AgentCommandPayload]
+
+
+class AgentCommandReplyRequest(BaseModel):
+    data: Dict[str, object] = Field(default_factory=dict)
+    metadata: Dict[str, object] = Field(default_factory=dict)
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+    exit_status: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _ensure_non_empty(self):  # type: ignore[override]
+        if (
+            not self.data
+            and not self.metadata
+            and self.stdout is None
+            and self.stderr is None
+            and self.exit_status is None
+        ):
+            raise ValueError("Reply payload must include at least one field")
+        return self
+
+
+class AgentCommandReplyPayload(BaseModel):
+    id: int
+    command_id: int
+    created_at: datetime
+    data: Dict[str, object] = Field(default_factory=dict)
+
+
+class AgentCommandReplyListResponse(BaseModel):
+    replies: List[AgentCommandReplyPayload]
 
 
 def command_result_to_dict(result: CommandResult) -> Dict[str, object]:
@@ -401,6 +432,70 @@ def create_app(
                 AgentCommandPayload(id=command.id, command=command.command)
                 for command in commands
             ]
+        )
+
+    @protected_router.get(
+        "/v1/servers/commands/replies",
+        response_model=AgentCommandReplyListResponse,
+    )
+    async def fetch_command_replies(
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> AgentCommandReplyListResponse:
+        replies = db.list_pending_agent_command_replies(current_user.id)
+        reply_ids = [reply.id for reply in replies]
+        if reply_ids:
+            db.mark_agent_command_replies_acknowledged(current_user.id, reply_ids)
+        return AgentCommandReplyListResponse(
+            replies=[
+                AgentCommandReplyPayload(
+                    id=reply.id,
+                    command_id=reply.command_id,
+                    created_at=reply.created_at,
+                    data=reply.data,
+                )
+                for reply in replies
+            ]
+        )
+
+    @protected_router.post(
+        "/v1/servers/commands/{command_id}/reply",
+        response_model=AgentCommandReplyPayload,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def submit_command_reply(
+        command_id: int,
+        payload: AgentCommandReplyRequest,
+        current_user: User = Depends(get_current_user),
+        db: Database = Depends(get_db),
+    ) -> AgentCommandReplyPayload:
+        cleaned: Dict[str, object] = {}
+        for key, value in payload.model_dump().items():
+            if value is None:
+                continue
+            if isinstance(value, dict) and not value:
+                continue
+            cleaned[key] = value
+
+        try:
+            reply = db.record_agent_command_reply(current_user.id, command_id, cleaned)
+        except ValueError as exc:
+            message = str(exc)
+            if message == "Command not found":
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=message,
+                ) from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=message,
+            ) from exc
+
+        return AgentCommandReplyPayload(
+            id=reply.id,
+            command_id=reply.command_id,
+            created_at=reply.created_at,
+            data=reply.data,
         )
 
     @protected_router.patch("/agents/{agent_id}", response_model=AgentResponse)

@@ -5,12 +5,13 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - exercised indirectly via tests
     from passlib.context import CryptContext
@@ -20,7 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - explicitly tested below
 from cryptography.fernet import Fernet, InvalidToken
 
 from .agent_registration import AgentProvisioningError, generate_provisioning_key_pair
-from .models import Agent, AgentCommand, ProvisioningKeyPair, User
+from .models import Agent, AgentCommand, AgentCommandReply, ProvisioningKeyPair, User
 
 
 def _ensure_directory(path: Path) -> None:
@@ -46,6 +47,27 @@ def _serialize_datetime(value: datetime) -> str:
 
 def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _prepare_command_reply_data(data: Mapping[str, object]) -> tuple[str, Dict[str, object]]:
+    normalized: Dict[str, object] = {}
+    for key, value in data.items():
+        normalized[str(key)] = value
+    try:
+        serialized = json.dumps(normalized, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - serialization validated by callers
+        raise ValueError("Reply payload must be JSON serializable") from exc
+    return serialized, normalized
+
+
+def _deserialize_command_reply_data(raw: str) -> Dict[str, object]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"raw": raw}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"value": parsed}
 
 
 def _generate_api_key() -> str:
@@ -166,9 +188,19 @@ class Database:
                     dispatched_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS agent_command_replies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    command_id INTEGER NOT NULL REFERENCES agent_commands(id) ON DELETE CASCADE,
+                    data TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    acknowledged_at TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
                 CREATE INDEX IF NOT EXISTS idx_users_api_key_prefix ON users(api_key_prefix);
                 CREATE INDEX IF NOT EXISTS idx_agent_commands_user_id ON agent_commands(user_id, dispatched_at);
+                CREATE INDEX IF NOT EXISTS idx_agent_command_replies_user_id ON agent_command_replies(user_id, acknowledged_at);
                 """
             )
 
@@ -684,6 +716,109 @@ class Database:
 
         return self._row_to_agent_command(row)
 
+    def record_agent_command_reply(
+        self,
+        user_id: int,
+        command_id: int,
+        data: Mapping[str, object],
+    ) -> AgentCommandReply:
+        if not data:
+            raise ValueError("Reply payload must not be empty")
+
+        command = self.get_agent_command(user_id, command_id)
+        if command is None:
+            raise ValueError("Command not found")
+
+        serialized, normalized = _prepare_command_reply_data(data)
+        created_at = _current_timestamp()
+        created_text = _serialize_datetime(created_at)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO agent_command_replies (user_id, command_id, data, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, command_id, serialized, created_text),
+            )
+            reply_id = cursor.lastrowid
+
+        reply = self.get_agent_command_reply(user_id, int(reply_id))
+        if reply is None:  # pragma: no cover - defensive guard
+            raise RuntimeError("Failed to persist command reply")
+        return reply
+
+    def list_pending_agent_command_replies(
+        self,
+        user_id: int,
+        *,
+        limit: Optional[int] = None,
+    ) -> List[AgentCommandReply]:
+        query = (
+            "SELECT id, user_id, command_id, data, created_at, acknowledged_at "
+            "FROM agent_command_replies "
+            "WHERE user_id = ? AND acknowledged_at IS NULL "
+            "ORDER BY created_at ASC, id ASC"
+        )
+        params: List[object] = [user_id]
+        if limit is not None:
+            numeric_limit = int(limit)
+            if numeric_limit <= 0:
+                return []
+            query += " LIMIT ?"
+            params.append(numeric_limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [self._row_to_agent_command_reply(row) for row in rows]
+
+    def mark_agent_command_replies_acknowledged(
+        self,
+        user_id: int,
+        reply_ids: Sequence[int],
+    ) -> None:
+        ids: List[int] = []
+        for reply_id in reply_ids:
+            try:
+                numeric_id = int(reply_id)
+            except (TypeError, ValueError):
+                continue
+            ids.append(numeric_id)
+
+        if not ids:
+            return
+
+        timestamp = _serialize_datetime(_current_timestamp())
+        placeholders = ",".join("?" for _ in ids)
+        query = (
+            f"UPDATE agent_command_replies SET acknowledged_at = ? "
+            f"WHERE user_id = ? AND acknowledged_at IS NULL AND id IN ({placeholders})"
+        )
+
+        with self._connect() as conn:
+            conn.execute(query, [timestamp, user_id, *ids])
+
+    def get_agent_command_reply(
+        self,
+        user_id: int,
+        reply_id: int,
+    ) -> Optional[AgentCommandReply]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, user_id, command_id, data, created_at, acknowledged_at
+                FROM agent_command_replies
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, reply_id),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_agent_command_reply(row)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -730,6 +865,22 @@ class Database:
             private_key=str(row["private_key"]),
             public_key=str(row["public_key"]),
             created_at=_parse_datetime(str(row["created_at"])),
+        )
+
+    def _row_to_agent_command_reply(self, row: sqlite3.Row) -> AgentCommandReply:
+        acknowledged_raw = row["acknowledged_at"]
+        acknowledged_at = (
+            _parse_datetime(str(acknowledged_raw)) if acknowledged_raw is not None else None
+        )
+        data_raw = row["data"]
+        payload = _deserialize_command_reply_data(str(data_raw))
+        return AgentCommandReply(
+            id=int(row["id"]),
+            user_id=int(row["user_id"]),
+            command_id=int(row["command_id"]),
+            data=payload,
+            created_at=_parse_datetime(str(row["created_at"])),
+            acknowledged_at=acknowledged_at,
         )
 
     def _build_api_key_cipher(self, secret: Optional[str]) -> Optional[Fernet]:

@@ -19,6 +19,20 @@ clean foundation.
 
 ## Getting started
 
+### Automated installation
+
+Run the installer script to install dependencies, initialise the database, and
+create the first user account:
+
+```bash
+python scripts/install_service.py
+```
+
+Use `--skip-deps` if you prefer to manage Python packages yourself. When the
+script completes you can start the API with `python main.py serve`.
+
+### Manual setup
+
 Create a virtual environment and install the web-service dependencies:
 
 ```bash

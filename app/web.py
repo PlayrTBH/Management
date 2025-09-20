@@ -228,10 +228,33 @@ def register_ui_routes(
         hypervisor_count = int(context.get("hypervisor_count", 0))
         online_count = int(context.get("online_count", 0))
         stylesheet = request.url_for("static", path="css/app.css")
+        agent_installer_url = html.escape(str(request.url_for("ui_agent_installer")))
+
+        page_header = f"""
+<header class="page-head">
+  <div class="page-head__content">
+    <h1 class="page-head__title">Hypervisors</h1>
+    <p class="page-head__subtitle">Monitor the systems paired with your management plane and review their tunnel activity.</p>
+    <div class="page-head__metrics">
+      <div class="page-head__metric">
+        <span class="page-head__metric-value">{hypervisor_count}</span>
+        <span class="page-head__metric-label">Paired</span>
+      </div>
+      <div class="page-head__metric">
+        <span class="page-head__metric-value">{online_count}</span>
+        <span class="page-head__metric-label">Online now</span>
+      </div>
+    </div>
+  </div>
+  <div class="page-head__actions">
+    <a class="button button--primary" href="{agent_installer_url}">Add hypervisor</a>
+  </div>
+</header>
+"""
 
         account_details = f"""
 <section class="card">
-  <h1 class="card__title">Account overview</h1>
+  <h2 class="card__title">Account overview</h2>
   <p class="card__subtitle">Review the details associated with your management account.</p>
   <dl class="detail-grid">
     <div class="detail-grid__item"><dt>Name</dt><dd>{html.escape(user.name)}</dd></div>
@@ -284,8 +307,8 @@ def register_ui_routes(
         if rows:
             table_body = "\n".join(rows)
             hypervisor_section = f"""
-<section class="card">
-  <div class="card__title">Paired hypervisors</div>
+<section class="card" id="hypervisors">
+  <h2 class="card__title">Paired hypervisors</h2>
   <p class="card__subtitle">Hypervisors authenticate back to this control plane and surface secure tunnels.</p>
   <div class="table">
     <div class="table__header">
@@ -302,8 +325,8 @@ def register_ui_routes(
 """
         else:
             hypervisor_section = """
-<section class="card">
-  <div class="card__title">Paired hypervisors</div>
+<section class="card" id="hypervisors">
+  <h2 class="card__title">Paired hypervisors</h2>
   <p class="card__subtitle">Hypervisors authenticate back to this control plane and surface secure tunnels.</p>
   <div class="empty-state">
     <h2>No hypervisors connected yet</h2>
@@ -312,7 +335,7 @@ def register_ui_routes(
 </section>
 """
 
-        body = account_details + hypervisor_section
+        body = page_header + account_details + hypervisor_section
         return _build_base_markup(
             request,
             user=user,
@@ -568,7 +591,11 @@ def register_ui_routes(
             return response
 
         sessions = await registry.list_sessions(user_id=user.id)
-        summaries = [_session_to_summary(session, registry) for session in sessions]
+        summaries = sorted(
+            (_session_to_summary(session, registry) for session in sessions),
+            key=lambda summary: summary.last_seen,
+            reverse=True,
+        )
         online = sum(1 for summary in summaries if summary.is_online)
 
         context = _base_context(

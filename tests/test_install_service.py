@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
 
 import pytest
 
 from app.database import Database
 from scripts.install_service import (
     UserInputError,
+    ROOT,
+    SERVICE_NAME,
     create_initial_user,
+    create_systemd_service,
     ensure_required_packages_installed,
     prompt_for_non_empty,
     _interactive_prompt_io,
@@ -161,3 +165,67 @@ def test_ensure_required_packages_installed_missing(monkeypatch):
     assert "uvicorn" in message
     # Ensure the error lists every missing dependency only once
     assert message.count("uvicorn") == 1
+
+
+def test_required_packages_include_python_multipart(monkeypatch):
+
+    attempts = []
+
+    def fake_import(name):
+        attempts.append(name)
+        if name == "python-multipart":
+            raise ImportError("No module named 'python-multipart'")
+        return object()
+
+    monkeypatch.setattr("scripts.install_service.importlib.import_module", fake_import)
+
+    ensure_required_packages_installed()
+
+    assert "multipart" in attempts
+    assert "python-multipart" not in attempts
+
+
+def test_create_systemd_service_writes_unit(tmp_path, monkeypatch):
+    commands = []
+
+    def fake_run(cmd):
+        commands.append(cmd)
+
+    monkeypatch.setattr("scripts.install_service.run_command", fake_run)
+    monkeypatch.setattr(
+        "scripts.install_service.shutil.which",
+        lambda name: "/bin/systemctl" if name == "systemctl" else None,
+    )
+
+    db_path = tmp_path / "management.sqlite3"
+    unit_path = create_systemd_service(db_path, service_dir=tmp_path)
+
+    assert unit_path == tmp_path / f"{SERVICE_NAME}.service"
+    contents = unit_path.read_text(encoding="utf-8")
+    exec_line = (
+        f"ExecStart={sys.executable} {ROOT / 'main.py'} serve --host 0.0.0.0 --port 443"
+    )
+    assert exec_line in contents
+    assert f"WorkingDirectory={ROOT}" in contents
+    assert f"Environment=MANAGEMENT_DB_PATH={db_path}" in contents
+
+    assert commands == [
+        ["/bin/systemctl", "daemon-reload"],
+        ["/bin/systemctl", "enable", SERVICE_NAME],
+        ["/bin/systemctl", "restart", SERVICE_NAME],
+    ]
+
+
+def test_create_systemd_service_skips_systemctl_when_missing(tmp_path, monkeypatch):
+    commands = []
+
+    def fake_run(cmd):
+        commands.append(cmd)
+
+    monkeypatch.setattr("scripts.install_service.run_command", fake_run)
+    monkeypatch.setattr("scripts.install_service.shutil.which", lambda name: None)
+
+    unit_path = create_systemd_service(tmp_path / "db.sqlite3", service_dir=tmp_path)
+
+    assert unit_path.exists()
+    assert commands == []

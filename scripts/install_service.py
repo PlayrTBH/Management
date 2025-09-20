@@ -9,10 +9,11 @@ import getpass
 import importlib
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Sequence, TextIO
+from typing import Iterable, NamedTuple, Sequence, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -73,13 +74,41 @@ def run_command(command: Sequence[str]) -> None:
     subprocess.check_call(command)
 
 
-REQUIRED_PACKAGES: tuple[str, ...] = (
-    "fastapi",
-    "uvicorn",
-    "httpx",
-    "jinja2",
-    "python-multipart",
+
+class PackageRequirement(NamedTuple):
+    """Represents a runtime dependency and the modules that satisfy it."""
+
+    package: str
+    modules: tuple[str, ...]
+
+
+REQUIRED_PACKAGES: tuple[PackageRequirement, ...] = (
+    PackageRequirement("fastapi", ("fastapi",)),
+    PackageRequirement("uvicorn", ("uvicorn",)),
+    PackageRequirement("httpx", ("httpx",)),
+    PackageRequirement("jinja2", ("jinja2",)),
+    PackageRequirement("python-multipart", ("multipart",)),
 )
+
+SERVICE_NAME = "playr-management"
+SYSTEMD_DIR_ENV = "MANAGEMENT_SYSTEMD_DIR"
+DEFAULT_SYSTEMD_DIR = Path("/etc/systemd/system")
+SYSTEMD_UNIT_TEMPLATE = """[Unit]
+Description=PlayrServers Management Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={working_dir}
+ExecStart={python} {entrypoint} serve --host 0.0.0.0 --port 443
+Restart=on-failure
+Environment=MANAGEMENT_DB_PATH={db_path}
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+"""
 
 
 def install_dependencies(extra_args: Sequence[str]) -> None:
@@ -97,16 +126,27 @@ def install_dependencies(extra_args: Sequence[str]) -> None:
 
 
 def ensure_required_packages_installed(
-    packages: Iterable[str] = REQUIRED_PACKAGES,
+    packages: Iterable[PackageRequirement | str] = REQUIRED_PACKAGES,
 ) -> None:
     """Verify that critical runtime dependencies can be imported."""
 
     missing: list[str] = []
-    for module_name in packages:
-        try:
-            importlib.import_module(module_name)
-        except ImportError:
-            missing.append(module_name)
+    for requirement in packages:
+        if isinstance(requirement, PackageRequirement):
+            spec = requirement
+        else:
+            normalized = str(requirement)
+            spec = PackageRequirement(normalized, (normalized,))
+
+        for module_name in spec.modules:
+            try:
+                importlib.import_module(module_name)
+            except ImportError:
+                continue
+            else:
+                break
+        else:
+            missing.append(spec.package)
 
     if missing:
         requirement_hint = ROOT / "requirements.txt"
@@ -125,6 +165,80 @@ def initialise_database(db_path_arg: str | None) -> tuple[Database, Path]:
     database.initialize()
     print(f"Database initialised at {resolved_path}")
     return database, resolved_path
+
+
+def _resolve_service_directory(service_dir: Path | None) -> Path:
+    if service_dir is not None:
+        return service_dir
+
+    override = os.getenv(SYSTEMD_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    return DEFAULT_SYSTEMD_DIR
+
+
+def _render_systemd_unit(
+    *,
+    db_path: Path,
+    python: Path | None = None,
+    entrypoint: Path | None = None,
+    working_dir: Path | None = None,
+) -> str:
+    python_path = Path(python or sys.executable)
+    entry_path = Path(entrypoint or (ROOT / "main.py"))
+    workdir = Path(working_dir or ROOT)
+
+    return SYSTEMD_UNIT_TEMPLATE.format(
+        working_dir=str(workdir),
+        python=str(python_path),
+        entrypoint=str(entry_path),
+        db_path=str(db_path),
+    )
+
+
+def _invoke_systemctl(*args: str) -> None:
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        print("systemctl not available; skipping:", "systemctl", *args)
+        return
+
+    run_command([systemctl, *args])
+
+
+def create_systemd_service(
+    db_path: Path,
+    *,
+    service_dir: Path | None = None,
+    python: Path | None = None,
+    entrypoint: Path | None = None,
+    working_dir: Path | None = None,
+) -> Path:
+    target_dir = _resolve_service_directory(service_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    service_path = target_dir / f"{SERVICE_NAME}.service"
+    unit_contents = _render_systemd_unit(
+        db_path=db_path,
+        python=python,
+        entrypoint=entrypoint,
+        working_dir=working_dir,
+    )
+
+    existing_contents = (
+        service_path.read_text(encoding="utf-8") if service_path.exists() else None
+    )
+
+    if existing_contents != unit_contents:
+        service_path.write_text(unit_contents, encoding="utf-8")
+        print(f"Wrote systemd service unit to {service_path}")
+        _invoke_systemctl("daemon-reload")
+    else:
+        print(f"Systemd service unit already up to date at {service_path}")
+
+    _invoke_systemctl("enable", SERVICE_NAME)
+    _invoke_systemctl("restart", SERVICE_NAME)
+    return service_path
 
 
 @contextlib.contextmanager
@@ -373,6 +487,7 @@ def main() -> int:
             admin_email=args.admin_email,
             admin_password=args.admin_password,
         )
+        service_unit_path = create_systemd_service(db_path)
     except subprocess.CalledProcessError as exc:
         cmd = exc.cmd
         if isinstance(cmd, (list, tuple)):
@@ -400,6 +515,7 @@ def main() -> int:
     )
     print(f"  • Start the API with: {start_command}")
     print(f"  • Database stored at: {db_path}")
+    print(f"  • systemd unit installed at: {service_unit_path}")
     return 0
 
 

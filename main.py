@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from collections import deque
@@ -58,6 +59,7 @@ from app.database import Database, resolve_database_path
 logger = logging.getLogger("playrservers.main")
 
 _DEFAULT_SERVICE_URL = "https://localhost"
+SYSTEMD_SERVICE_NAME = "playr-management"
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -117,6 +119,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent
+
+
+def _systemctl_path() -> str | None:
+    return shutil.which("systemctl")
+
+
+def _run_systemctl(*args: str) -> None:
+    systemctl = _systemctl_path()
+    if not systemctl:
+        print("systemctl not available; skipping:", "systemctl", *args)
+        return
+
+    result = subprocess.run([systemctl, *args], check=False)
+    if result.returncode != 0:
+        print(
+            f"systemctl {' '.join(args)} exited with status {result.returncode}.",
+        )
 
 
 def _initialise_database() -> Database:
@@ -350,10 +369,33 @@ def _view_logs() -> None:
 def _update_service() -> None:
     print("Fetching latest changes from upstream repository...\n")
     result = subprocess.run(["git", "pull", "--ff-only"], cwd=_project_root(), check=False)
-    if result.returncode == 0:
-        print("Repository is up to date.")
-    else:
+    if result.returncode != 0:
         print("git pull failed. Please resolve the issues above and try again.")
+        return
+
+    print("Repository is up to date.\n")
+
+    installer = _project_root() / "scripts" / "install_service.py"
+    if installer.exists():
+        print("Re-applying installer to refresh dependencies and service configuration...\n")
+        install_result = subprocess.run(
+            [sys.executable, str(installer)],
+            cwd=_project_root(),
+            check=False,
+        )
+        if install_result.returncode != 0:
+            print(
+                "Installer exited with a non-zero status. Review the output above and try again.",
+            )
+            return
+    else:
+        print("Installer script not found; restarting service directly.")
+        _run_systemctl("daemon-reload")
+        _run_systemctl("restart", SYSTEMD_SERVICE_NAME)
+        return
+
+    _run_systemctl("restart", SYSTEMD_SERVICE_NAME)
+    print("Service update complete.")
 
 
 def main(argv: Sequence[str] | None = None) -> None:

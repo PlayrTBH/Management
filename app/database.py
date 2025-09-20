@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - exercised indirectly via tests
     from passlib.context import CryptContext
@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - explicitly tested below
 from cryptography.fernet import Fernet, InvalidToken
 
 from .agent_registration import AgentProvisioningError, generate_provisioning_key_pair
-from .models import Agent, ProvisioningKeyPair, User
+from .models import Agent, AgentCommand, ProvisioningKeyPair, User
 
 
 def _ensure_directory(path: Path) -> None:
@@ -158,8 +158,17 @@ class Database:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS agent_commands (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    command TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    dispatched_at TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
                 CREATE INDEX IF NOT EXISTS idx_users_api_key_prefix ON users(api_key_prefix);
+                CREATE INDEX IF NOT EXISTS idx_agent_commands_user_id ON agent_commands(user_id, dispatched_at);
                 """
             )
 
@@ -580,6 +589,102 @@ class Database:
         return self.get_agent_for_user(user_id, agent_id)
 
     # ------------------------------------------------------------------
+    # Agent command queue
+    # ------------------------------------------------------------------
+    def enqueue_agent_command(self, user_id: int, command: str) -> AgentCommand:
+        trimmed = command.strip()
+        if not trimmed:
+            raise ValueError("Command must not be empty")
+
+        created_at = _current_timestamp()
+        serialized_created = _serialize_datetime(created_at)
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO agent_commands (user_id, command, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (user_id, trimmed, serialized_created),
+            )
+            command_id = cursor.lastrowid
+
+        return AgentCommand(
+            id=int(command_id),
+            user_id=user_id,
+            command=trimmed,
+            created_at=created_at,
+            dispatched_at=None,
+        )
+
+    def list_pending_agent_commands(
+        self,
+        user_id: int,
+        *,
+        limit: Optional[int] = None,
+    ) -> List[AgentCommand]:
+        query = (
+            "SELECT id, user_id, command, created_at, dispatched_at "
+            "FROM agent_commands "
+            "WHERE user_id = ? AND dispatched_at IS NULL "
+            "ORDER BY created_at ASC, id ASC"
+        )
+        params: List[object] = [user_id]
+        if limit is not None:
+            numeric_limit = int(limit)
+            if numeric_limit <= 0:
+                return []
+            query += " LIMIT ?"
+            params.append(numeric_limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        return [self._row_to_agent_command(row) for row in rows]
+
+    def mark_agent_commands_dispatched(
+        self,
+        user_id: int,
+        command_ids: Sequence[int],
+    ) -> None:
+        ids: List[int] = []
+        for command_id in command_ids:
+            try:
+                numeric_id = int(command_id)
+            except (TypeError, ValueError):
+                continue
+            ids.append(numeric_id)
+
+        if not ids:
+            return
+
+        timestamp = _serialize_datetime(_current_timestamp())
+        placeholders = ",".join("?" for _ in ids)
+        query = (
+            f"UPDATE agent_commands SET dispatched_at = ? "
+            f"WHERE user_id = ? AND dispatched_at IS NULL AND id IN ({placeholders})"
+        )
+
+        with self._connect() as conn:
+            conn.execute(query, [timestamp, user_id, *ids])
+
+    def get_agent_command(self, user_id: int, command_id: int) -> Optional[AgentCommand]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, user_id, command, created_at, dispatched_at
+                FROM agent_commands
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, command_id),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return self._row_to_agent_command(row)
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _row_to_user(self, row: sqlite3.Row) -> User:
@@ -604,6 +709,19 @@ class Database:
             allow_unknown_hosts=bool(row["allow_unknown_hosts"]),
             known_hosts_path=row["known_hosts_path"],
             created_at=_parse_datetime(str(row["created_at"])),
+        )
+
+    def _row_to_agent_command(self, row: sqlite3.Row) -> AgentCommand:
+        dispatched_raw = row["dispatched_at"]
+        dispatched_at = (
+            _parse_datetime(str(dispatched_raw)) if dispatched_raw is not None else None
+        )
+        return AgentCommand(
+            id=int(row["id"]),
+            user_id=int(row["user_id"]),
+            command=str(row["command"]),
+            created_at=_parse_datetime(str(row["created_at"])),
+            dispatched_at=dispatched_at,
         )
 
     def _row_to_provisioning_keys(self, row: sqlite3.Row) -> ProvisioningKeyPair:

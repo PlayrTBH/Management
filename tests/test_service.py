@@ -194,6 +194,32 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertEqual(agent_info["agent_id"], "agent-list")
             self.assertEqual(agent_info["hostname"], "hypervisor-list")
 
+    def test_dashboard_displays_connected_hypervisors(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            login = client.post(
+                "/login",
+                data={"email": self.user_email, "password": self.user_password},
+                follow_redirects=True,
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+
+            connect = client.post(
+                "/v1/agents/connect",
+                auth=self._auth(),
+                json={"agent_id": "agent-ui", "hostname": "hypervisor-ui"},
+            )
+            self.assertEqual(connect.status_code, 200, connect.text)
+
+            dashboard = client.get("/dashboard")
+            self.assertEqual(dashboard.status_code, 200, dashboard.text)
+            body = dashboard.text
+            self.assertIn("Hypervisors", body)
+            self.assertIn("agent-ui", body)
+            self.assertIn("hypervisor-ui", body)
+
     def test_agent_endpoints_accept_api_keys(self) -> None:
         api_key = self.database.create_api_key(self.user.id, "Test agent key")
         registry = AgentRegistry()

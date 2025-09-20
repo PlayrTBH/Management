@@ -3,8 +3,28 @@
 {% block title %}Dashboard · PlayrServers Management{% endblock %}
 
 {% block content %}
+<header class="page-head">
+  <div class="page-head__content">
+    <h1 class="page-head__title">Hypervisors</h1>
+    <p class="page-head__subtitle">Monitor the systems paired with your management plane and review their tunnel activity.</p>
+    <div class="page-head__metrics">
+      <div class="page-head__metric">
+        <span class="page-head__metric-value">{{ hypervisor_count }}</span>
+        <span class="page-head__metric-label">Paired</span>
+      </div>
+      <div class="page-head__metric">
+        <span class="page-head__metric-value">{{ online_count }}</span>
+        <span class="page-head__metric-label">Online now</span>
+      </div>
+    </div>
+  </div>
+  <div class="page-head__actions">
+    <a class="button button--primary" href="{{ request.url_for('ui_agent_installer') }}">Add hypervisor</a>
+  </div>
+</header>
+
 <section class="card">
-  <h1 class="card__title">Account overview</h1>
+  <h2 class="card__title">Account overview</h2>
   <p class="card__subtitle">Review the details associated with your management account.</p>
   <dl class="detail-grid">
     <div class="detail-grid__item">
@@ -30,8 +50,8 @@
   </dl>
 </section>
 
-<section class="card">
-  <div class="card__title">Paired hypervisors</div>
+<section class="card" id="hypervisors">
+  <h2 class="card__title">Paired hypervisors</h2>
   <p class="card__subtitle">Hypervisors authenticate back to this control plane and surface secure tunnels.</p>
 
   {% if hypervisors %}

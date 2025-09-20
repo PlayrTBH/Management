@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
-from fastapi import APIRouter, FastAPI, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Request, status
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -110,6 +110,7 @@ def register_ui_routes(
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     router = APIRouter(include_in_schema=False)
+    agent_script_path = Path(__file__).resolve().parent.parent / "scripts" / "install_agent.sh"
 
     def _base_context(request: Request, user: Optional[User], **extra):
         context = {
@@ -130,13 +131,24 @@ def register_ui_routes(
         content: str,
     ) -> str:
         dashboard_url = request.url_for("ui_dashboard")
+        agent_url = request.url_for("ui_agent_installer")
         logout_url = request.url_for("ui_logout")
         brand = "PlayrServers Management"
         if user:
             user_name = html.escape(user.name)
+            current_path = request.url.path
+            dashboard_path = request.app.url_path_for("ui_dashboard")
+            agent_path = request.app.url_path_for("ui_agent_installer")
+            dashboard_class = "nav-link"
+            if current_path == dashboard_path:
+                dashboard_class += " nav-link--active"
+            agent_class = "nav-link"
+            if current_path == agent_path:
+                agent_class += " nav-link--active"
             nav_actions = (
                 f'<nav class="navbar__actions" aria-label="Primary">'
-                f'<a href="{dashboard_url}" class="nav-link nav-link--active">Dashboard</a>'
+                f'<a href="{dashboard_url}" class="{dashboard_class}">Dashboard</a>'
+                f'<a href="{agent_url}" class="{agent_class}">Agent installer</a>'
                 f'<a href="{logout_url}" class="nav-link">Sign out</a>'
                 f'<span class="navbar__user">{user_name}</span>'
                 "</nav>"
@@ -323,6 +335,41 @@ def register_ui_routes(
         markup = _render_dashboard_markup(context, request)
         return HTMLResponse(markup)
 
+    def _render_agent_installer_markup(context: Dict[str, object], request: Request) -> str:
+        user = context.get("user")
+        assert isinstance(user, User)
+        script_url = html.escape(str(context.get("script_url", "")))
+        curl_command = html.escape(str(context.get("curl_command", "")))
+        api_help = html.escape(str(context.get("api_help", "")))
+        stylesheet = request.url_for("static", path="css/app.css")
+        body = f"""
+<section class=\"card\">
+  <h1 class=\"card__title\">Install the hypervisor agent</h1>
+  <p class=\"card__subtitle\">Deploy the PlayrServers agent on a supported Ubuntu host to pair it with this control plane.</p>
+  <div class=\"callout\">
+    <code>{curl_command}</code>
+  </div>
+  <p>The command above downloads the signed installer from <code>{script_url}</code> and provisions QEMU, libvirt, and the reverse tunnel runtime.</p>
+  <p>{api_help}</p>
+  <h2>Non-interactive installs</h2>
+  <p>Provide flags to the installer to skip prompts:</p>
+  <pre><code>{curl_command} -- --api-key &lt;your-api-key&gt; --agent-id $(hostname)</code></pre>
+</section>
+"""
+        return _build_base_markup(
+            request,
+            user=user,
+            title="Agent installer · PlayrServers Management",
+            stylesheet=str(stylesheet),
+            content=body,
+        )
+
+    def _render_agent_installer_response(request: Request, context: Dict[str, object]) -> HTMLResponse:
+        if templates is not None:
+            return templates.TemplateResponse("agent_installer.html", context)
+        markup = _render_agent_installer_markup(context, request)
+        return HTMLResponse(markup)
+
     async def _parse_login_form(request: Request) -> Tuple[str, str]:
         body_bytes = await request.body()
         content_type = request.headers.get("content-type", "")
@@ -464,6 +511,45 @@ def register_ui_routes(
         if token:
             _issue_session_cookie(response, token)
         return response
+
+    @router.get("/installers/agent", response_class=HTMLResponse, name="ui_agent_installer")
+    async def agent_installer(request: Request):
+        user, token = _load_user(request)
+        if user is None:
+            response = RedirectResponse(
+                request.url_for("ui_login"), status_code=status.HTTP_303_SEE_OTHER
+            )
+            if token:
+                _clear_session_cookie(response, token)
+            return response
+
+        script_url = request.url_for("agent_installer_script")
+        curl_command = f"curl -fsSL {script_url} | sudo bash"
+        api_help = (
+            "Generate an API key from the administration tooling and supply it to the installer "
+            "using the --api-key flag to authorise the agent."
+        )
+
+        context = _base_context(
+            request,
+            user,
+            script_url=script_url,
+            curl_command=curl_command,
+            api_help=api_help,
+        )
+        response = _render_agent_installer_response(request, context)
+        if token:
+            _issue_session_cookie(response, token)
+        return response
+
+    @router.get("/agent", response_class=PlainTextResponse, name="agent_installer_script")
+    async def agent_installer_script():
+        try:
+            content = agent_script_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:  # pragma: no cover - missing asset
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent installer not available") from exc
+        headers = {"Content-Disposition": "attachment; filename=install_agent.sh"}
+        return PlainTextResponse(content, headers=headers)
 
     app.include_router(router)
 

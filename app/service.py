@@ -8,7 +8,12 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBasic,
+    HTTPBasicCredentials,
+    HTTPBearer,
+)
 from pydantic import BaseModel, Field
 
 from .agents import (
@@ -191,17 +196,28 @@ def _initialise_database(database: Database) -> Database:
 
 
 def _build_auth_dependency(database: Database):
-    security = HTTPBasic()
+    basic_security = HTTPBasic(auto_error=False)
+    bearer_security = HTTPBearer(auto_error=False)
 
-    def dependency(credentials: HTTPBasicCredentials = Depends(security)) -> User:
-        user = database.authenticate_user(credentials.username, credentials.password)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication credentials",
-                headers={"WWW-Authenticate": "Basic"},
-            )
-        return user
+    def dependency(
+        credentials: HTTPBasicCredentials | None = Depends(basic_security),
+        bearer: HTTPAuthorizationCredentials | None = Depends(bearer_security),
+    ) -> User:
+        if bearer is not None:
+            user = database.authenticate_api_key(bearer.credentials)
+            if user is not None:
+                return user
+
+        if credentials is not None:
+            user = database.authenticate_user(credentials.username, credentials.password)
+            if user is not None:
+                return user
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
 
     return dependency
 

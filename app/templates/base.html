@@ -15,6 +15,7 @@
       {% if user %}
       <nav class="navbar__actions" aria-label="Primary">
         <a href="{{ request.url_for('ui_dashboard') }}" class="nav-link{% if request.url.path == request.url_for('ui_dashboard') %} nav-link--active{% endif %}">Dashboard</a>
+        <a href="{{ request.url_for('ui_agent_installer') }}" class="nav-link{% if request.url.path == request.url_for('ui_agent_installer') %} nav-link--active{% endif %}">Agent installer</a>
         <a href="{{ request.url_for('ui_logout') }}" class="nav-link">Sign out</a>
         <span class="navbar__user">{{ user.name }}</span>
       </nav>

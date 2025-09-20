@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Agent installer · PlayrServers Management{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1 class="card__title">Install the hypervisor agent</h1>
+  <p class="card__subtitle">Provision an Ubuntu host with the PlayrServers agent to manage QEMU virtual machines remotely.</p>
+  <div class="callout">
+    <code>curl -fsSL {{ request.url_for('agent_installer_script') }} | sudo bash</code>
+  </div>
+  <p>The installer configures QEMU, libvirt, and supporting packages before deploying the agent runtime and systemd service.</p>
+  <p>{{ api_help }}</p>
+  <h2>Non-interactive usage</h2>
+  <p>Pass installer flags to customise the deployment:</p>
+  <pre><code>curl -fsSL {{ request.url_for('agent_installer_script') }} | sudo bash -s -- --api-key &lt;your-api-key&gt; --agent-id {{ user.name | replace(' ', '-') | lower }}</code></pre>
+</section>
+
+<section class="card">
+  <h2 class="card__title">What gets installed?</h2>
+  <ul class="list">
+    <li>Required QEMU/KVM and libvirt packages for Ubuntu hosts.</li>
+    <li>A dedicated <code>playr-agent</code> system user and Python virtual environment.</li>
+    <li>The PlayrServers agent service that maintains an encrypted tunnel to {{ request.url.hostname or 'manage.playrservers.com' }}.</li>
+    <li>Automatic systemd integration so the agent starts on boot and restarts after failures.</li>
+  </ul>
+</section>
+{% endblock %}

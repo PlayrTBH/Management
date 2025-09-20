@@ -92,6 +92,29 @@ def _verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+def _generate_api_key() -> tuple[str, str, str]:
+    """Return a tuple of (prefix, secret, full_key)."""
+
+    prefix = secrets.token_hex(6)
+    secret = secrets.token_urlsafe(32)
+    full_key = f"psm_{prefix}_{secret}"
+    return prefix, secret, full_key
+
+
+def _split_api_key(value: str) -> tuple[str, str] | None:
+    """Parse the API key and return (prefix, secret)."""
+
+    if not value:
+        return None
+    parts = value.strip().split("_", 2)
+    if len(parts) != 3 or parts[0] != "psm":
+        return None
+    prefix, secret = parts[1], parts[2]
+    if not prefix or not secret:
+        return None
+    return prefix, secret
+
+
 class Database:
     """Thin wrapper around SQLite for persisting user accounts."""
 
@@ -118,6 +141,19 @@ class Database:
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    prefix TEXT NOT NULL UNIQUE,
+                    secret_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_api_keys_user_id
+                    ON api_keys(user_id);
                 """
             )
 
@@ -247,6 +283,72 @@ class Database:
         if refreshed is None:
             raise ValueError("User not found")
         return refreshed
+
+    def create_api_key(self, user_id: int, name: str) -> str:
+        """Create a new API key for ``user_id`` and return the plaintext value."""
+
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("API key name must not be empty")
+
+        created_at = _current_timestamp()
+
+        with self._connect() as conn:
+            while True:
+                prefix, secret, full_key = _generate_api_key()
+                secret_hash = _hash_password(secret)
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO api_keys (user_id, name, prefix, secret_hash, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            normalized_name,
+                            prefix,
+                            secret_hash,
+                            _serialize_datetime(created_at),
+                        ),
+                    )
+                    break
+                except sqlite3.IntegrityError:
+                    continue
+
+        return full_key
+
+    def authenticate_api_key(self, api_key: str) -> Optional[User]:
+        """Authenticate a user using an API key string."""
+
+        parsed = _split_api_key(api_key)
+        if not parsed:
+            return None
+        prefix, secret = parsed
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT user_id, secret_hash FROM api_keys WHERE prefix = ?",
+                (prefix,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        stored_hash = str(row["secret_hash"])
+        if not _verify_password(secret, stored_hash):
+            return None
+
+        user = self.get_user(int(row["user_id"]))
+        if user is None:
+            return None
+
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE api_keys SET last_used_at = ? WHERE prefix = ?",
+                (_serialize_datetime(_current_timestamp()), prefix),
+            )
+
+        return user
 
     def _row_to_user(self, row: sqlite3.Row) -> User:
         return User(

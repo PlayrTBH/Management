@@ -37,48 +37,22 @@
                             </div>
                         {% endfor %}
                     {% else %}
-                        <p class="muted">No hypervisors registered yet. Use the form to onboard your first agent.</p>
+                        <p class="muted">No hypervisors are paired yet. Install and start the PlayrServers agent on a host to enrol it automatically.</p>
                     {% endif %}
                 </div>
             </section>
             <section>
-                <h2>Add hypervisor</h2>
-                <form method="post" action="{{ request.url_for('register_agent') }}">
-                    <div class="field">
-                        <label for="agent-name">Name</label>
-                        <input type="text" id="agent-name" name="name" required placeholder="hypervisor-01">
-                    </div>
-                    <div class="field">
-                        <label for="agent-hostname">Hostname / IP</label>
-                        <input type="text" id="agent-hostname" name="hostname" required placeholder="203.0.113.42">
-                    </div>
-                    <div class="field">
-                        <label for="agent-port">SSH port</label>
-                        <input type="number" id="agent-port" name="port" value="22" min="1" max="65535" required>
-                    </div>
-                    <div class="field">
-                        <label for="agent-username">SSH username</label>
-                        <input type="text" id="agent-username" name="username" required placeholder="qemu-admin">
-                    </div>
-                    <div class="field">
-                        <label for="agent-key">Private key</label>
-                        <textarea id="agent-key" name="private_key" required placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-                    </div>
-                    <div class="field">
-                        <label for="agent-passphrase">Private key passphrase <span class="muted">(optional)</span></label>
-                        <input type="password" id="agent-passphrase" name="private_key_passphrase" autocomplete="off">
-                    </div>
-                    <div class="field">
-                        <label for="agent-known-hosts">Known hosts path <span class="muted">(optional)</span></label>
-                        <input type="text" id="agent-known-hosts" name="known_hosts_path" placeholder="~/.ssh/known_hosts">
-                    </div>
-                    <div class="field" style="flex-direction: row; align-items: center; gap: 0.75rem;">
-                        <input type="checkbox" id="agent-allow-unknown" name="allow_unknown_hosts" value="1">
-                        <label for="agent-allow-unknown">Allow unknown host keys</label>
-                    </div>
-                    <p class="help-text">Upload a dedicated automation key. The control plane stores the private key encrypted at rest.</p>
-                    <button type="submit" class="button">Register hypervisor</button>
-                </form>
+                <h2>Pair hypervisors</h2>
+                <div class="notice warning">
+                    <p><strong>Agent pairing required.</strong> Manual onboarding with raw SSH credentials has been disabled. Install the PlayrServers agent service on each host to register it with the control plane.</p>
+                </div>
+                <p>Once the agent connects using your automation API key, the hypervisor appears in this list automatically. Keep the agent running to ensure SSH keys and metadata stay synchronized.</p>
+                <ol>
+                    <li>Install the <strong>HVDeploy</strong> agent on the target hypervisor.</li>
+                    <li>Create <code>/etc/playrservers/agent.env</code> with the API base URL and key from your <a href="{{ request.url_for('account') }}">account page</a>.</li>
+                    <li>Start the agent service; it will call <code>POST /v1/servers/connect</code> to enrol the host.</li>
+                </ol>
+                <p class="help-text">Need the agent toolkit? The operations team maintains download links and deployment guides in the remote agent section below.</p>
             </section>
         </div>
     </div>
@@ -90,7 +64,7 @@
         </div>
         <div id="vm-status" class="muted">
             {% if not agents %}
-                Register a hypervisor to view its virtual machines.
+                Pair a hypervisor with the agent service to view its virtual machines.
             {% elif not selected_agent %}
                 Select a hypervisor to load its virtual machines.
             {% else %}
@@ -118,7 +92,7 @@
         </div>
         <div id="deployment-placeholder" class="placeholder-box"{% if selected_agent %} style="display: none;"{% endif %}>
             {% if not agents %}
-                Register a hypervisor to enable guided VM deployments.
+                Pair a hypervisor with the agent service to enable guided VM deployments.
             {% elif not selected_agent %}
                 Select a hypervisor to prepare an automated operating system installation.
             {% endif %}
@@ -198,7 +172,7 @@
         </div>
         <div id="vm-console-placeholder" class="placeholder-box">
             {% if not agents %}
-                Register a hypervisor to access guest consoles.
+                Pair a hypervisor with the agent service to access guest consoles.
             {% elif not selected_agent %}
                 Select a hypervisor and choose a VM to open its console.
             {% else %}
@@ -229,7 +203,7 @@
         </div>
         <div id="host-info-placeholder" class="placeholder-box">
             {% if not agents %}
-                Register a hypervisor to monitor its performance metrics.
+                Pair a hypervisor with the agent service to monitor its performance metrics.
             {% elif not selected_agent %}
                 Select a hypervisor to view system metrics.
             {% else %}
@@ -1034,7 +1008,7 @@
             deploymentPlaceholder.style.display = '';
             deploymentPlaceholder.textContent = state.agents.length
                 ? 'Select a hypervisor to prepare an automated operating system installation.'
-                : 'Register a hypervisor to enable guided VM deployments.';
+                : 'Pair a hypervisor with the agent service to enable guided VM deployments.';
             setDeploymentStatus('Select a hypervisor to deploy.', false);
             return;
         }
@@ -1567,7 +1541,7 @@
             vmConsolePlaceholder.style.display = '';
             vmConsolePlaceholder.textContent = state.agents.length
                 ? 'Select a hypervisor and choose a VM to open its console.'
-                : 'Register a hypervisor to access guest consoles.';
+                : 'Pair a hypervisor with the agent service to access guest consoles.';
             vmConsoleSection.style.display = 'none';
             disconnectVmConsole(false);
             if (vmConsoleLabel) {
@@ -2184,7 +2158,7 @@
         if (!agent) {
             const message = state.agents.length
                 ? 'Select a hypervisor to view system metrics.'
-                : 'Register a hypervisor to monitor its performance metrics.';
+                : 'Pair a hypervisor with the agent service to monitor its performance metrics.';
             showHostInfoPlaceholder(message, 'Idle');
             return;
         }
@@ -2246,7 +2220,7 @@
         if (!state.agents.length) {
             const empty = document.createElement('p');
             empty.className = 'muted';
-            empty.textContent = 'No hypervisors registered yet. Use the form to onboard your first agent.';
+            empty.textContent = 'No hypervisors are paired yet. Install and start the PlayrServers agent on a host to enrol it automatically.';
             agentList.appendChild(empty);
             return;
         }
@@ -2582,8 +2556,8 @@
         setVmStatus('Select a hypervisor to load its virtual machines.');
         showHostInfoPlaceholder('Select a hypervisor to view system metrics.');
     } else {
-        setVmStatus('Register a hypervisor to view its virtual machines.');
-        showHostInfoPlaceholder('Register a hypervisor to monitor its performance metrics.');
+        setVmStatus('Pair a hypervisor with the agent service to view its virtual machines.');
+        showHostInfoPlaceholder('Pair a hypervisor with the agent service to monitor its performance metrics.');
     }
 
     refreshDeploymentSummaries({ manual: true });

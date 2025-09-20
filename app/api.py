@@ -35,17 +35,6 @@ class RotateAPIKeyResponse(BaseModel):
     api_key_prefix: str
 
 
-class CreateAgentRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    hostname: str = Field(..., min_length=1, max_length=255)
-    port: int = Field(default=22, ge=1, le=65535)
-    username: str = Field(..., min_length=1, max_length=64)
-    private_key: str = Field(..., min_length=40)
-    private_key_passphrase: Optional[str] = Field(default=None, max_length=255)
-    allow_unknown_hosts: bool = False
-    known_hosts_path: Optional[str] = Field(default=None, max_length=1024)
-
-
 class UpdateAgentRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     hostname: Optional[str] = Field(default=None, min_length=1, max_length=255)
@@ -280,25 +269,6 @@ def create_app(
     async def list_agents(current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> List[AgentResponse]:
         agents = db.list_agents_for_user(current_user.id)
         return [agent_to_response(agent) for agent in agents]
-
-    @protected_router.post("/agents", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
-    async def create_agent(
-        payload: CreateAgentRequest,
-        current_user: User = Depends(get_current_user),
-        db: Database = Depends(get_db),
-    ) -> AgentResponse:
-        agent = db.create_agent(
-            current_user.id,
-            name=payload.name.strip(),
-            hostname=payload.hostname.strip(),
-            port=payload.port,
-            username=payload.username.strip(),
-            private_key=payload.private_key,
-            private_key_passphrase=payload.private_key_passphrase,
-            allow_unknown_hosts=payload.allow_unknown_hosts,
-            known_hosts_path=payload.known_hosts_path.strip() if payload.known_hosts_path else None,
-        )
-        return agent_to_response(agent)
 
     @protected_router.get("/agents/{agent_id}", response_model=AgentResponse)
     async def read_agent(agent: Agent = Depends(get_agent)) -> AgentResponse:

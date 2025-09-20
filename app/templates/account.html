@@ -55,41 +55,58 @@
             <span class="badge">Prefix: {{ user.api_key_prefix }}</span>
         </div>
         <p class="muted">Remote agents authenticate with this key when calling <code>{{ api_base_url }}</code>. Rotate immediately if you suspect a compromise.</p>
+        {% set visible_api_key = revealed_api_key or generated_api_key %}
+        <div class="notice warning">
+            <p><strong>Protect this secret.</strong> Anyone with the full API key can manage your hypervisors. Reveal it only in a trusted environment and rotate immediately if you suspect exposure.</p>
+        </div>
         <div class="notice">
             <p><strong>API endpoint:</strong> <code>{{ api_base_url }}</code></p>
-            {% if generated_api_key %}
-                <p><strong>New API key:</strong></p>
-                <pre><code>{{ generated_api_key }}</code></pre>
-                <p class="help-text">Copy the token now—this is the only time it will be displayed.</p>
-            {% else %}
-                <p><strong>Current key prefix:</strong> <code>{{ user.api_key_prefix }}</code></p>
-            {% endif %}
+            <p><strong>Current key prefix:</strong> <code>{{ user.api_key_prefix }}</code></p>
         </div>
-        <form method="post" action="{{ request.url_for('rotate_api_key') }}">
-            <button type="submit" class="button danger">Rotate API key</button>
-        </form>
+        {% if visible_api_key %}
+            <div class="notice danger">
+                <p><strong>Full API key:</strong></p>
+                <pre><code>{{ visible_api_key }}</code></pre>
+                {% if revealed_api_key %}
+                    <p class="help-text">Rotate the credential if this value was displayed somewhere unsafe.</p>
+                {% else %}
+                    <p class="help-text">Copy the token now—this is the only time it will be displayed after rotation.</p>
+                {% endif %}
+            </div>
+        {% endif %}
+        <div class="grid-2">
+            <section>
+                <h3>Reveal current key</h3>
+                <form method="post" action="{{ request.url_for('reveal_api_key') }}">
+                    <div class="field">
+                        <label for="reveal-password">Account password</label>
+                        <input type="password" id="reveal-password" name="password" required autocomplete="current-password">
+                    </div>
+                    <p class="help-text">Confirm your identity to decrypt and display the existing API key.</p>
+                    <button type="submit" class="button secondary">Reveal API key</button>
+                </form>
+            </section>
+            <section>
+                <h3>Rotate key</h3>
+                <form method="post" action="{{ request.url_for('rotate_api_key') }}">
+                    <p class="help-text">Issuing a new key immediately revokes the previous secret.</p>
+                    <button type="submit" class="button danger">Rotate API key</button>
+                </form>
+            </section>
+        </div>
         <p style="margin-top: 1.5rem;">Provision the remote agent environment file on your hypervisor:</p>
 <pre><code>sudo install -d -m 700 /etc/playrservers
 sudo tee /etc/playrservers/agent.env &gt; /dev/null &lt;&lt;'CONFIG'
 API_BASE_URL={{ api_base_url }}
-API_KEY={{ generated_api_key or '&lt;your-api-key&gt;' }}
+API_KEY={{ visible_api_key or '&lt;your-api-key&gt;' }}
 CONFIG
 sudo chmod 600 /etc/playrservers/agent.env
 </code></pre>
-        <p>With the agent configured, enroll the host via cURL:</p>
-<pre><code>source /etc/playrservers/agent.env
-curl -X POST "$API_BASE_URL/agents" \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "name": "hypervisor-01",
-        "hostname": "203.0.113.42",
-        "port": 22,
-        "username": "qemu-admin",
-        "private_key": "$(cat /etc/playrservers/ssh/id_ed25519)"
-      }'
+        <p>After configuring the environment, restart the agent to trigger pairing:</p>
+<pre><code>sudo systemctl restart playrservers-agent
+sudo journalctl -u playrservers-agent -n 50
 </code></pre>
-        <p class="muted">The control plane operations team maintains <code>{{ api_base_url }}</code>; reference this URL when configuring agents to reach the API listener (<code>MANAGEMENT_API_PORT</code>, <code>8001</code> by default).</p>
+        <p class="muted">The agent calls <code>POST /v1/servers/connect</code> on startup to register the host using the credentials above.</p>
     </div>
 </div>
 {% endblock %}

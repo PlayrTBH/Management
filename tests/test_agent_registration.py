@@ -175,6 +175,25 @@ def test_agent_registration_updates_when_ip_changes(tmp_path: Path):
     assert agent.name == "hv-01"
 
 
+def test_manual_agent_creation_endpoint_removed(tmp_path: Path):
+    app, _, _, api_key, _, _ = _build_app(tmp_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agents",
+            headers=_auth_header(api_key),
+            json={
+                "name": "legacy-agent",
+                "hostname": "198.51.100.25",
+                "port": 22,
+                "username": "hvdeploy",
+                "private_key": "dummy",
+            },
+        )
+
+    assert response.status_code in {404, 405}
+
+
 def test_private_key_cannot_be_retrieved_via_api(tmp_path: Path):
     app, database, user, api_key, _, _ = _build_app(tmp_path)
 

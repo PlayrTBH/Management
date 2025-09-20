@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import os
 from contextlib import suppress
+import shlex
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+import anyio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -181,6 +184,21 @@ class AgentCommandReplyPayload(BaseModel):
 class AgentCommandReplyListResponse(BaseModel):
     replies: List[AgentCommandReplyPayload]
 
+
+class RunSSHCommandRequest(BaseModel):
+    command: List[str] = Field(..., min_length=1)
+    timeout: Optional[int] = Field(default=60, ge=1, le=3600)
+
+    @field_validator("command")
+    @classmethod
+    def _normalize_command(cls, value: List[str]) -> List[str]:
+        normalized: List[str] = []
+        for part in value:
+            if not isinstance(part, str):
+                raise ValueError("command must be a list of strings")
+            stripped = part.strip()
+            normalized.append(stripped)
+        return normalized
 
 def command_result_to_dict(result: CommandResult) -> Dict[str, object]:
     return {
@@ -363,6 +381,35 @@ def create_app(
     @protected_router.get("/agents/{agent_id}", response_model=AgentResponse)
     async def read_agent(agent: Agent = Depends(get_agent)) -> AgentResponse:
         return agent_to_response(agent)
+
+    @protected_router.post("/agents/{agent_id}/ssh/command")
+    async def run_ssh_command(
+        payload: RunSSHCommandRequest,
+        agent: Agent = Depends(get_agent),
+    ) -> Dict[str, object]:
+        target = agent_to_target(agent)
+        runner = SSHCommandRunner(SSHClientFactory(target))
+        timeout = payload.timeout or 60
+        try:
+            result = runner.run(payload.command, timeout=timeout)
+        except HostKeyVerificationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                    "hostname": exc.hostname,
+                    "port": exc.port or agent.port,
+                    "suggestion": exc.suggestion,
+                },
+            ) from exc
+        except SSHError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=str(exc),
+            ) from exc
+
+        return command_result_to_dict(result)
 
     @protected_router.post("/v1/servers/connect", response_model=AgentConnectResponse)
     async def register_server(
@@ -636,6 +683,67 @@ def create_app(
                 {
                     "type": "error",
                     "message": "SSH session terminated unexpectedly.",
+                },
+            )
+        finally:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                with suppress(Exception):
+                    await websocket.close()
+
+    @app.websocket("/agents/{agent_id}/vms/{vm_name}/console")
+    async def agent_vm_console(websocket: WebSocket, agent_id: int, vm_name: str):
+        user, error_code = _authenticate_websocket(websocket)
+        if user is None:
+            await websocket.close(code=error_code or 4401)
+            return
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            await websocket.close(code=4404)
+            return
+
+        cleaned_vm_name = vm_name.strip()
+        if not cleaned_vm_name:
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+
+        try:
+            with _build_ssh_terminal(agent) as channel:
+                command = f"virsh console --force {shlex.quote(cleaned_vm_name)}\n"
+                await anyio.to_thread.run_sync(channel.send, command.encode("utf-8"))
+
+                async def detach_console():
+                    with suppress(Exception):
+                        await anyio.to_thread.run_sync(channel.send, b"\x1d\n")
+                        await anyio.to_thread.run_sync(channel.send, b"exit\n")
+
+                await send_websocket_json(
+                    websocket,
+                    {"type": "status", "status": "connected", "vm": cleaned_vm_name},
+                )
+                await stream_ssh_channel(websocket, channel, on_close=detach_console)
+        except HostKeyVerificationError as exc:
+            await send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                },
+            )
+        except (SSHError, RuntimeError) as exc:
+            await send_websocket_json(
+                websocket,
+                {"type": "error", "message": str(exc)},
+            )
+        except Exception:
+            await send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": "Console session terminated unexpectedly.",
                 },
             )
         finally:

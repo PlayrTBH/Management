@@ -64,6 +64,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 ENV_FILE="${APP_ENV_FILE:-/etc/manage-playrservers.env}"
 DEFAULT_APP_REPO="${DEFAULT_APP_REPO:-https://github.com/PlayrTBH/Management.git}"
 
+TLS_DIR="${TLS_DIR:-${APP_DIR}/config/tls}"
+TLS_CERTFILE="${TLS_CERTFILE:-${TLS_DIR}/server.crt}"
+TLS_KEYFILE="${TLS_KEYFILE:-${TLS_DIR}/server.key}"
+TLS_CERT_DAYS="${TLS_CERT_DAYS:-825}"
+
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 PROJECT_ROOT=""
 if [[ -n "$SCRIPT_SOURCE" ]]; then
@@ -79,7 +84,7 @@ if [[ -z "$APP_REPO" ]]; then
     fi
 fi
 
-APT_PACKAGES=(python3 python3-venv python3-pip git rsync)
+APT_PACKAGES=(python3 python3-venv python3-pip git rsync openssl)
 if [[ "$INSTALL_NGINX" == "1" ]]; then
     APT_PACKAGES+=(nginx)
 fi
@@ -98,7 +103,7 @@ run_cmd() {
 }
 
 PROGRESS_WIDTH=32
-TOTAL_SECTIONS=7
+TOTAL_SECTIONS=8
 if [[ "$INSTALL_NGINX" == "1" ]]; then
     TOTAL_SECTIONS=$((TOTAL_SECTIONS + 1))
 fi
@@ -325,8 +330,8 @@ on_exit() {
         fi
         if (( SERVICE_ACTIVE == 1 )); then
             log_success "Installation complete. Service '${SERVICE_NAME}' is active."
-            log_info "Management UI: http://${APP_HOST}:${APP_PORT}"
-            log_info "Automation API: http://${APP_HOST}:${APP_PORT}/api"
+            log_info "Management UI: https://${APP_HOST}:${APP_PORT}"
+            log_info "Automation API: https://${APP_HOST}:${APP_PORT}/api"
             log_info "Environment overrides: ${ENV_FILE}"
             if [[ "$INSTALL_NGINX" != "1" ]]; then
                 log_info "nginx configuration was skipped (INSTALL_NGINX=${INSTALL_NGINX})."
@@ -408,7 +413,8 @@ deploy_application_code() {
             --exclude '.git' \
             --exclude '.venv' \
             --exclude '__pycache__' \
-            --exclude '*.pyc'
+            --exclude '*.pyc' \
+            --exclude 'config/tls/'
     fi
 }
 
@@ -425,6 +431,76 @@ bootstrap_python_environment() {
     section_step run_cmd sudo -u "$APP_USER" "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
     section_step run_cmd sudo -u "$APP_USER" bash -c "set -euo pipefail; source '$APP_DIR/.venv/bin/activate'; pip install --upgrade pip; pip install -r '$APP_DIR/requirements.txt'"
     section_step run_cmd install -d -m 750 -o "$APP_USER" -g "$APP_GROUP" "$APP_DIR/data"
+}
+
+build_tls_subject_alt_name() {
+    local san_entries=()
+    if [[ -n "$APP_DOMAIN" ]]; then
+        san_entries+=("DNS:${APP_DOMAIN}")
+    fi
+    if [[ -n "$API_DOMAIN" ]]; then
+        san_entries+=("DNS:${API_DOMAIN}")
+    fi
+    san_entries+=("DNS:localhost")
+    san_entries+=("IP:127.0.0.1")
+
+    local host_candidate="$APP_HOST"
+    if [[ -n "$host_candidate" && "$host_candidate" != "0.0.0.0" && "$host_candidate" != "::" ]]; then
+        if [[ "$host_candidate" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            san_entries+=("IP:${host_candidate}")
+        elif [[ "$host_candidate" =~ : ]]; then
+            san_entries+=("IP:${host_candidate}")
+        else
+            san_entries+=("DNS:${host_candidate}")
+        fi
+    fi
+
+    declare -A seen=()
+    local filtered=()
+    local entry
+    for entry in "${san_entries[@]}"; do
+        if [[ -z "$entry" ]]; then
+            continue
+        fi
+        if [[ -n "${seen[$entry]:-}" ]]; then
+            continue
+        fi
+        seen[$entry]=1
+        filtered+=("$entry")
+    done
+
+    local IFS=,
+    echo "${filtered[*]}"
+}
+
+ensure_tls_certificate_files() {
+    if [[ -f "$TLS_CERTFILE" && -f "$TLS_KEYFILE" ]]; then
+        append_log "TLS certificate already present at ${TLS_CERTFILE}"
+    else
+        append_log "Generating self-signed TLS certificate at ${TLS_CERTFILE}"
+        local san
+        san=$(build_tls_subject_alt_name)
+        run_cmd openssl req -x509 -nodes -newkey rsa:4096 -days "$TLS_CERT_DAYS" \
+            -keyout "$TLS_KEYFILE" \
+            -out "$TLS_CERTFILE" \
+            -subj "/CN=${APP_DOMAIN}" \
+            -addext "subjectAltName=${san}"
+    fi
+
+    run_cmd chown "$APP_USER:$APP_GROUP" "$TLS_CERTFILE" "$TLS_KEYFILE"
+    run_cmd chmod 640 "$TLS_KEYFILE"
+    run_cmd chmod 644 "$TLS_CERTFILE"
+}
+
+configure_tls_materials() {
+    append_log "-- Provisioning TLS materials"
+    local steps=(
+        "Create TLS directory at ${TLS_DIR}"
+        "Ensure TLS certificate and key exist"
+    )
+    section_define_steps "${steps[@]}"
+    section_step run_cmd install -d -m 750 -o "$APP_USER" -g "$APP_GROUP" "$TLS_DIR"
+    section_step ensure_tls_certificate_files
 }
 
 write_systemd_unit_file() {
@@ -477,6 +553,9 @@ write_environment_defaults() {
 # MANAGEMENT_DB_PATH=/var/lib/manage-playrservers/management.sqlite3
 MANAGEMENT_PUBLIC_API_URL=https://${API_DOMAIN}
 MANAGEMENT_SESSION_SECRET=${SESSION_SECRET}
+MANAGEMENT_SSL_CERTFILE=${TLS_CERTFILE}
+MANAGEMENT_SSL_KEYFILE=${TLS_KEYFILE}
+MANAGEMENT_SESSION_SECURE=true
 EOF
 }
 
@@ -502,6 +581,33 @@ ensure_session_secret() {
         echo "MANAGEMENT_SESSION_SECRET=${secret}" >> "$ENV_FILE"
     else
         append_log "MANAGEMENT_SESSION_SECRET already set in ${ENV_FILE}"
+    fi
+}
+
+ensure_ssl_certfile() {
+    if ! grep -q '^MANAGEMENT_SSL_CERTFILE=' "$ENV_FILE"; then
+        append_log "Adding MANAGEMENT_SSL_CERTFILE to ${ENV_FILE}"
+        echo "MANAGEMENT_SSL_CERTFILE=${TLS_CERTFILE}" >> "$ENV_FILE"
+    else
+        append_log "MANAGEMENT_SSL_CERTFILE already set in ${ENV_FILE}"
+    fi
+}
+
+ensure_ssl_keyfile() {
+    if ! grep -q '^MANAGEMENT_SSL_KEYFILE=' "$ENV_FILE"; then
+        append_log "Adding MANAGEMENT_SSL_KEYFILE to ${ENV_FILE}"
+        echo "MANAGEMENT_SSL_KEYFILE=${TLS_KEYFILE}" >> "$ENV_FILE"
+    else
+        append_log "MANAGEMENT_SSL_KEYFILE already set in ${ENV_FILE}"
+    fi
+}
+
+ensure_session_secure() {
+    if ! grep -q '^MANAGEMENT_SESSION_SECURE=' "$ENV_FILE"; then
+        append_log "Adding MANAGEMENT_SESSION_SECURE to ${ENV_FILE}"
+        echo "MANAGEMENT_SESSION_SECURE=true" >> "$ENV_FILE"
+    else
+        append_log "MANAGEMENT_SESSION_SECURE already set in ${ENV_FILE}"
     fi
 }
 
@@ -531,10 +637,16 @@ configure_environment_file() {
         local steps=(
             "Ensure MANAGEMENT_PUBLIC_API_URL is defined"
             "Ensure MANAGEMENT_SESSION_SECRET is defined"
+            "Ensure MANAGEMENT_SSL_CERTFILE is defined"
+            "Ensure MANAGEMENT_SSL_KEYFILE is defined"
+            "Ensure MANAGEMENT_SESSION_SECURE is defined"
         )
         section_define_steps "${steps[@]}"
         section_step ensure_public_api_url
         section_step ensure_session_secret
+        section_step ensure_ssl_certfile
+        section_step ensure_ssl_keyfile
+        section_step ensure_session_secure
     fi
 }
 
@@ -559,7 +671,7 @@ server {
     server_name ${APP_DOMAIN};
 
     location / {
-        proxy_pass http://${APP_HOST}:${APP_PORT};
+        proxy_pass https://${APP_HOST}:${APP_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -568,6 +680,10 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_read_timeout 3600;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${APP_DOMAIN};
+        proxy_ssl_trusted_certificate ${TLS_CERTFILE};
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
     }
 }
 
@@ -576,7 +692,7 @@ server {
     server_name ${API_DOMAIN};
 
     location / {
-        proxy_pass http://${APP_HOST}:${APP_PORT}/api/;
+        proxy_pass https://${APP_HOST}:${APP_PORT}/api/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -585,6 +701,10 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_read_timeout 3600;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${API_DOMAIN};
+        proxy_ssl_trusted_certificate ${TLS_CERTFILE};
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
     }
 }
 EOF
@@ -618,6 +738,7 @@ run_section "Preparing system packages" prepare_system_packages
 run_section "Configuring application account" configure_application_account
 run_section "Deploying application code" deploy_application_code
 run_section "Bootstrapping Python environment" bootstrap_python_environment
+run_section "Provisioning TLS materials" configure_tls_materials
 run_section "Writing systemd unit" configure_systemd_service
 run_section "Configuring environment defaults" configure_environment_file
 run_section "Starting services" start_services

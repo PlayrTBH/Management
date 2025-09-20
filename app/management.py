@@ -66,6 +66,8 @@ def create_app(
     api_base_url: Optional[str] = None,
     session_secret: Optional[str] = None,
     initialize_database: bool = False,
+    internal_api_base_url: Optional[str] = None,
+    internal_api_verify: str | bool | None = None,
 ) -> FastAPI:
     """Create the management web application."""
 
@@ -95,6 +97,8 @@ def create_app(
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_hosts())
     app.state.database = database
     app.state.public_api_url = api_base_url
+    app.state.internal_api_base_url = internal_api_base_url
+    app.state.internal_api_verify = internal_api_verify
     if not hasattr(app.state, "deployment_logs"):
         app.state.deployment_logs = DeploymentLogManager()
 
@@ -305,7 +309,9 @@ def create_app(
 
         api_key = _get_user_api_key(user)
 
-        base_url = _resolve_api_base_url()
+        internal_base = getattr(app.state, "internal_api_base_url", None)
+        verify = getattr(app.state, "internal_api_verify", None)
+        base_url = internal_base or _resolve_api_base_url()
 
         return APICommandRunner(
             base_url,
@@ -313,6 +319,7 @@ def create_app(
             agent_id=agent.id,
             hostname=agent.hostname,
             port=agent.port,
+            verify=verify if internal_base else None,
         )
 
     def _build_ssh_runner(agent: Agent, *, user: User | None = None) -> SSHCommandRunner:

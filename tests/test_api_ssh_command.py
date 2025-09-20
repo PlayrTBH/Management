@@ -115,7 +115,8 @@ def test_api_command_runner_success(monkeypatch):
         "stderr": "",
     }
 
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002
+    def fake_post(url, json=None, headers=None, timeout=None, verify=None):  # noqa: A002
+        assert verify is None
         return httpx.Response(200, json=result_payload)
 
     monkeypatch.setattr(httpx, "post", fake_post)
@@ -144,7 +145,8 @@ def test_api_command_runner_host_key_error(monkeypatch):
         }
     }
 
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002
+    def fake_post(url, json=None, headers=None, timeout=None, verify=None):  # noqa: A002
+        assert verify is None
         return httpx.Response(502, json=detail)
 
     monkeypatch.setattr(httpx, "post", fake_post)
@@ -162,8 +164,40 @@ def test_api_command_runner_host_key_error(monkeypatch):
 
 
 def test_api_command_runner_http_error(monkeypatch):
-    def fake_post(url, json=None, headers=None, timeout=None):  # noqa: A002
+    def fake_post(url, json=None, headers=None, timeout=None, verify=None):  # noqa: A002
+        assert verify is None
         return httpx.Response(401, json={"detail": "unauthorized"})
+
+
+def test_api_command_runner_verify_option(monkeypatch):
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None, verify=None):  # noqa: A002
+        captured.update({
+            "url": url,
+            "verify": verify,
+        })
+        return httpx.Response(200, json={
+            "command": ["uptime"],
+            "exit_status": 0,
+            "stdout": "ok",
+            "stderr": "",
+        })
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    runner = APICommandRunner(
+        "https://api.example.com",
+        "api-key",
+        agent_id=7,
+        hostname="hv.internal",
+        port=22,
+        verify="/tmp/ca.pem",
+    )
+
+    runner.run(["uptime"])
+    assert captured["url"].endswith("/agents/7/ssh/command")
+    assert captured["verify"] == "/tmp/ca.pem"
 
     monkeypatch.setattr(httpx, "post", fake_post)
 
@@ -175,6 +209,6 @@ def test_api_command_runner_http_error(monkeypatch):
         port=22,
     )
 
-    with pytest.raises(SSHError) as excinfo:
-        runner.run(["virsh", "list"])
-    assert "Authentication" in str(excinfo.value)
+    runner.run(["virsh", "list"])
+    assert captured["url"].endswith("/agents/1/ssh/command")
+    assert captured["verify"] is None

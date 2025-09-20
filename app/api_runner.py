@@ -56,6 +56,7 @@ class APICommandRunner:
         hostname: str,
         port: int,
         timeout: float = 30.0,
+        verify: str | bool | None = None,
     ) -> None:
         self._config = _RunnerConfig(
             base_url=_normalize_base_url(base_url),
@@ -67,6 +68,7 @@ class APICommandRunner:
         )
         if not self._config.api_key:
             raise ValueError("API key must not be empty when using APICommandRunner")
+        self._verify = verify
 
     def run(self, args: Sequence[str], timeout: int = 60) -> CommandResult:
         command = [str(part) for part in args]
@@ -87,6 +89,7 @@ class APICommandRunner:
                 json=payload,
                 headers=headers,
                 timeout=self._config.timeout,
+                verify=self._verify,
             )
         except httpx.RequestError as exc:  # pragma: no cover - network failure
             raise SSHError(f"Failed to contact SSH relay API: {exc}") from exc

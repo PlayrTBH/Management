@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import os
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ try:  # pragma: no cover - exercised indirectly via tests
     from passlib.context import CryptContext
 except ModuleNotFoundError:  # pragma: no cover - explicitly tested below
     CryptContext = None  # type: ignore[assignment]
+
+from cryptography.fernet import Fernet, InvalidToken
 
 from .agent_registration import AgentProvisioningError, generate_provisioning_key_pair
 from .models import Agent, ProvisioningKeyPair, User
@@ -103,9 +106,12 @@ def _verify_password(password: str, hashed: str) -> bool:
 class Database:
     """Simple wrapper around SQLite for persisting users and agents."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, api_key_secret: Optional[str] = None) -> None:
         _ensure_directory(path)
         self._path = path
+        if api_key_secret is None:
+            api_key_secret = os.getenv("MANAGEMENT_SESSION_SECRET")
+        self._api_key_cipher = self._build_api_key_cipher(api_key_secret)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, check_same_thread=False)
@@ -126,6 +132,7 @@ class Database:
                     api_key_prefix TEXT NOT NULL,
                     api_key_hash TEXT NOT NULL,
                     api_key_salt TEXT NOT NULL,
+                    api_key_encrypted TEXT,
                     password_hash TEXT,
                     created_at TEXT NOT NULL
                 );
@@ -162,6 +169,8 @@ class Database:
             }
             if "password_hash" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            if "api_key_encrypted" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN api_key_encrypted TEXT")
 
     # ------------------------------------------------------------------
     # User management
@@ -184,13 +193,23 @@ class Database:
         prefix = api_key[:8]
         password_hash = _hash_password(password)
         normalized_email = email.strip().lower() if email else None
+        encrypted_api_key = self._encrypt_api_key(api_key)
 
         with self._connect() as conn:
             try:
                 cursor = conn.execute(
                     """
-                    INSERT INTO users (name, email, api_key_prefix, api_key_hash, api_key_salt, password_hash, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO users (
+                        name,
+                        email,
+                        api_key_prefix,
+                        api_key_hash,
+                        api_key_salt,
+                        api_key_encrypted,
+                        password_hash,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         name,
@@ -198,6 +217,7 @@ class Database:
                         prefix,
                         base64.b64encode(hash_bytes).decode("ascii"),
                         base64.b64encode(salt).decode("ascii"),
+                        encrypted_api_key,
                         password_hash,
                         _serialize_datetime(created_at),
                     ),
@@ -326,18 +346,20 @@ class Database:
         salt = secrets.token_bytes(16)
         hash_bytes = _hash_api_key(api_key, salt)
         prefix = api_key[:8]
+        encrypted_api_key = self._encrypt_api_key(api_key)
 
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE users
-                   SET api_key_prefix = ?, api_key_hash = ?, api_key_salt = ?
+                   SET api_key_prefix = ?, api_key_hash = ?, api_key_salt = ?, api_key_encrypted = ?
                  WHERE id = ?
                 """,
                 (
                     prefix,
                     base64.b64encode(hash_bytes).decode("ascii"),
                     base64.b64encode(salt).decode("ascii"),
+                    encrypted_api_key,
                     user_id,
                 ),
             )
@@ -346,6 +368,24 @@ class Database:
         if refreshed is None:
             raise ValueError("User not found")
         return refreshed, api_key
+
+    def get_user_api_key(self, user_id: int) -> Optional[str]:
+        """Return the decrypted API key for the given user, if available."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT api_key_encrypted FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        encrypted = row["api_key_encrypted"]
+        if not encrypted:
+            return None
+
+        return self._decrypt_api_key(str(encrypted))
 
     # ------------------------------------------------------------------
     # Provisioning key management
@@ -573,6 +613,33 @@ class Database:
             public_key=str(row["public_key"]),
             created_at=_parse_datetime(str(row["created_at"])),
         )
+
+    def _build_api_key_cipher(self, secret: Optional[str]) -> Optional[Fernet]:
+        if not secret:
+            return None
+        digest = hashlib.sha256(secret.encode("utf-8")).digest()
+        key = base64.urlsafe_b64encode(digest)
+        return Fernet(key)
+
+    def _require_api_key_cipher(self) -> Fernet:
+        if self._api_key_cipher is None:
+            raise RuntimeError(
+                "API key encryption secret is not configured. Set MANAGEMENT_SESSION_SECRET to enable API key retrieval."
+            )
+        return self._api_key_cipher
+
+    def _encrypt_api_key(self, api_key: str) -> str:
+        cipher = self._require_api_key_cipher()
+        token = cipher.encrypt(api_key.encode("utf-8"))
+        return token.decode("utf-8")
+
+    def _decrypt_api_key(self, encrypted: str) -> str:
+        cipher = self._require_api_key_cipher()
+        try:
+            plaintext = cipher.decrypt(encrypted.encode("utf-8"))
+        except InvalidToken as exc:
+            raise ValueError("Stored API key could not be decrypted. Rotate the key to repair it.") from exc
+        return plaintext.decode("utf-8")
 
 
 __all__ = ["Database", "resolve_database_path"]

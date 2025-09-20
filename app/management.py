@@ -399,6 +399,7 @@ def create_app(
             return _redirect_to_login(request)
         messages = _consume_flash(request)
         generated = request.session.pop("flash_api_key", None)
+        revealed = request.session.pop("revealed_api_key", None)
         return templates.TemplateResponse(
             "account.html",
             {
@@ -406,6 +407,7 @@ def create_app(
                 "user": user,
                 "messages": messages,
                 "generated_api_key": generated,
+                "revealed_api_key": revealed,
                 "password_min_length": PASSWORD_MIN_LENGTH,
             },
         )
@@ -481,6 +483,50 @@ def create_app(
         if user is None:
             return _redirect_to_login(request)
         return _handle_api_key_rotation(request, user)
+
+    @app.post("/account/api-key/reveal", name="reveal_api_key")
+    async def reveal_api_key(request: Request, password: str = Form(...)):
+        user = _get_current_user(request)
+        if user is None:
+            return _redirect_to_login(request)
+
+        if not database.verify_user_password(user.id, password):
+            _flash(request, "Password is incorrect.", category="error")
+            return RedirectResponse(
+                request.url_for("account"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        try:
+            api_key = database.get_user_api_key(user.id)
+        except (RuntimeError, ValueError) as exc:
+            _flash(request, str(exc), category="error")
+            return RedirectResponse(
+                request.url_for("account"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        if not api_key:
+            _flash(
+                request,
+                "No API key is available to reveal. Rotate the credential to generate a new secret.",
+                category="error",
+            )
+            return RedirectResponse(
+                request.url_for("account"),
+                status_code=status.HTTP_303_SEE_OTHER,
+            )
+
+        request.session["revealed_api_key"] = api_key
+        _flash(
+            request,
+            "API key revealed below. Keep this secret safe and rotate it if exposure is suspected.",
+            category="warning",
+        )
+        return RedirectResponse(
+            request.url_for("account"),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
 
     @app.post("/api-key/rotate")
     async def legacy_rotate_api_key(request: Request):
@@ -591,79 +637,6 @@ def create_app(
                 "endpoints": endpoints,
                 "deployment_profiles": deployment_profiles,
             },
-        )
-
-    @app.post("/management/agents", name="register_agent")
-    async def register_agent(
-        request: Request,
-        name: str = Form(...),
-        hostname: str = Form(...),
-        port: str = Form("22"),
-        username: str = Form(...),
-        private_key: str = Form(...),
-        private_key_passphrase: str = Form(""),
-        allow_unknown_hosts: Optional[str] = Form(None),
-        known_hosts_path: str = Form(""),
-    ):
-        user = _get_current_user(request)
-        if user is None:
-            return _redirect_to_login(request)
-
-        errors: List[str] = []
-        cleaned_name = name.strip()
-        cleaned_hostname = hostname.strip()
-        cleaned_username = username.strip()
-        cleaned_key = private_key.strip()
-        cleaned_passphrase = private_key_passphrase.strip()
-        cleaned_known_hosts = known_hosts_path.strip()
-        port_value = 22
-
-        if not cleaned_name:
-            errors.append("Hypervisor name is required.")
-        if not cleaned_hostname:
-            errors.append("Hostname or IP address is required.")
-        try:
-            port_value = int(port)
-            if not (1 <= port_value <= 65535):
-                errors.append("Port must be between 1 and 65535.")
-        except ValueError:
-            errors.append("Port must be a valid integer.")
-        if not cleaned_username:
-            errors.append("SSH username is required.")
-        if not cleaned_key:
-            errors.append("An SSH private key is required.")
-
-        if errors:
-            for message in errors:
-                _flash(request, message, category="error")
-            return RedirectResponse(
-                request.url_for("management"),
-                status_code=status.HTTP_303_SEE_OTHER,
-            )
-
-        try:
-            agent = database.create_agent(
-                user.id,
-                name=cleaned_name,
-                hostname=cleaned_hostname,
-                port=port_value,
-                username=cleaned_username,
-                private_key=cleaned_key,
-                private_key_passphrase=cleaned_passphrase or None,
-                allow_unknown_hosts=bool(allow_unknown_hosts),
-                known_hosts_path=cleaned_known_hosts or None,
-            )
-        except ValueError as exc:
-            _flash(request, str(exc), category="error")
-            return RedirectResponse(
-                request.url_for("management"),
-                status_code=status.HTTP_303_SEE_OTHER,
-            )
-
-        _flash(request, f"Added hypervisor '{agent.name}'.", category="success")
-        return RedirectResponse(
-            f"{request.url_for('management')}?agent={agent.id}",
-            status_code=status.HTTP_303_SEE_OTHER,
         )
 
     @app.post("/management/agents/{agent_id}/delete", name="remove_agent")

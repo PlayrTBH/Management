@@ -194,32 +194,14 @@ API does not expose a self-registration endpoint.
 | Method | Path                               | Description                                   |
 | ------ | ---------------------------------- | --------------------------------------------- |
 | GET    | `/agents`                          | List the caller's registered agents           |
-| POST   | `/agents`                          | Register a new agent / virtualization host    |
 | GET    | `/agents/{id}`                     | Retrieve metadata for a specific agent        |
-| PATCH  | `/agents/{id}`                     | Update agent metadata or credentials          |
+| PATCH  | `/agents/{id}`                     | Update agent metadata                         |
 | DELETE | `/agents/{id}`                     | Remove an agent                               |
 
 > **Security note:** SSH private keys uploaded to the control plane are stored
-> encrypted at rest and are never retrievable via the public API. Legacy
-> clients that previously called `/agents/{id}/credentials` now receive a
-> `404 Not Found` response and should instead rely on key material supplied at
-> registration time or the automatic provisioning flow documented below.
-
-Agent registration payload example:
-
-```bash
-curl -X POST https://api.playrservers.com/agents \
-  -H 'Authorization: Bearer <api-key>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "name": "dalek-hypervisor",
-        "hostname": "192.0.2.15",
-        "port": 22,
-        "username": "qemu-admin",
-        "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----\n",
-        "allow_unknown_hosts": false
-      }'
-```
+> encrypted at rest and are never retrievable via the public API. Manual
+> registration with raw credentials (`POST /agents`) has been removed—hosts must
+> pair themselves via the automatic provisioning flow documented below.
 
 ### Agent auto-registration
 

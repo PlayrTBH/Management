@@ -97,3 +97,47 @@ def test_management_page_renders_with_registered_agent(tmp_path):
             agents_payload[0]["remove_url"]
             == f"http://testserver/management/agents/{agent.id}/delete"
         )
+
+
+def test_account_api_key_reveal_requires_password(tmp_path):
+    database = Database(tmp_path / "management.sqlite3")
+    database.initialize()
+    _, api_key = database.create_user("Reveal User", EMAIL, PASSWORD)
+
+    app = create_app(
+        database=database,
+        session_secret="not-so-secret",
+        api_base_url="https://example.com",
+    )
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/login",
+            data={"email": EMAIL, "password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        # Incorrect password should not reveal the key
+        denied = client.post(
+            "/account/api-key/reveal",
+            data={"password": "wrong-password"},
+            follow_redirects=False,
+        )
+        assert denied.status_code == 303
+        follow = client.get("/account")
+        assert follow.status_code == 200
+        assert "Password is incorrect." in follow.text
+        assert api_key not in follow.text
+
+        # Correct password exposes the key on the account page
+        allowed = client.post(
+            "/account/api-key/reveal",
+            data={"password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert allowed.status_code == 303
+        revealed = client.get("/account")
+        assert revealed.status_code == 200
+        assert api_key in revealed.text
+        assert "Full API key" in revealed.text

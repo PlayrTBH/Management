@@ -1745,7 +1745,10 @@
         try {
             clearHostInfoTimer();
             const url = buildUrl(state.endpoints.host_info, agent.id);
-            const response = await fetch(url, { credentials: 'same-origin' });
+            const response = await fetch(url, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+            });
             const payload = await response.json();
             if (!response.ok || payload.status !== 'ok') {
                 const error = new Error(payload.message || 'Unable to retrieve host diagnostics.');
@@ -2038,7 +2041,10 @@
         setVmStatus('Querying virtual machines from ' + agent.name + '…');
         try {
             const url = buildUrl(state.endpoints.list_vms, agent.id);
-            const response = await fetch(url, { credentials: 'same-origin' });
+            const response = await fetch(url, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+            });
             const payload = await response.json();
             if (payload.status !== 'ok') {
                 throw new Error(payload.message || 'Unable to list virtual machines.');

@@ -159,7 +159,14 @@ def _interactive_prompt_io() -> tuple[TextIO | None, TextIO | None]:
             tty_in = open(tty_path, "r", encoding="utf-8", buffering=1)
             tty_out = open("CONOUT$", "w", encoding="utf-8", buffering=1)
         else:
-            tty_in = tty_out = open(tty_path, "r+", encoding="utf-8", buffering=1)
+            # ``/dev/tty`` is not seekable which makes opening it in read/write mode
+            # with ``open(..., "r+")`` unsuitable – the ``io`` module requires a
+            # seekable file object for ``r+`` and raises ``OSError`` otherwise.
+            # Use separate read/write handles instead so that interactive prompts
+            # continue to function even when ``sys.stdin``/``stdout`` are redirected
+            # (for example when running the installer via a shell pipeline).
+            tty_in = open(tty_path, "r", encoding="utf-8", buffering=1)
+            tty_out = open(tty_path, "w", encoding="utf-8", buffering=1)
     except OSError as exc:
         # Fall back to the existing standard streams when a controlling terminal
         # is unavailable (e.g. when the installer runs inside a pipeline or

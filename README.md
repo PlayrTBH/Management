@@ -76,8 +76,8 @@ provision QEMU, libvirt, and the PlayrServers agent runtime:
 curl -fsSL https://<host>/agent | sudo bash
 ```
 
-Create an API key for the agent using the bundled helper and supply it to the
-installer when prompted:
+Generate an API key for the agent from the web dashboard's **Agent installer**
+page or use the bundled helper and supply it to the installer when prompted:
 
 ```bash
 python scripts/create_api_key.py admin@example.com --name "DC-1 hypervisor"

@@ -121,6 +121,40 @@ def _image_root_shell_preamble() -> str:
     snippet = f"""
 DEFAULT_IMAGE_ROOT={shlex.quote(default_root)}
 IMAGES_DIR="$DEFAULT_IMAGE_ROOT"
+MANAGEMENT_IMAGE_USER="$(id -un)"
+MANAGEMENT_IMAGE_GROUP="$(id -gn)"
+
+ensure_directories() {{
+    if [ "$#" -eq 0 ]; then
+        return 0
+    fi
+
+    if mkdir -p "$@" 2>/dev/null; then
+        local dir
+        local need_adjust=0
+        for dir in "$@"; do
+            if [ ! -d "$dir" ] || [ ! -w "$dir" ]; then
+                need_adjust=1
+                break
+            fi
+        done
+        if [ "$need_adjust" -eq 0 ]; then
+            return 0
+        fi
+    fi
+
+    if [ "$(id -u)" -eq 0 ]; then
+        install -d -m 0775 -o "$MANAGEMENT_IMAGE_USER" -g "$MANAGEMENT_IMAGE_GROUP" "$@"
+        return 0
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo install -d -m 0775 -o "$MANAGEMENT_IMAGE_USER" -g "$MANAGEMENT_IMAGE_GROUP" "$@"
+        return 0
+    fi
+
+    install -d -m 0775 "$@"
+}}
 
 if [ -n "${{MANAGEMENT_QEMU_IMAGE_ROOT+x}}" ]; then
     CANDIDATE="$(printf '%s' "${{MANAGEMENT_QEMU_IMAGE_ROOT}}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -213,7 +247,7 @@ USER_DATA="$SEED_DIR/user-data"
 META_DATA="$SEED_DIR/meta-data"
 DOWNLOAD_URL={shlex.quote('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img')}
 
-mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$IMAGES_DIR/iso" "$IMAGES_DIR/unattend"
+ensure_directories "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$IMAGES_DIR/iso" "$IMAGES_DIR/unattend"
 
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     echo "Virtual machine '$VM_NAME' already exists." >&2
@@ -233,7 +267,7 @@ fi
 
 qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$DISK_IMAGE" {disk_gb}G
 
-mkdir -p "$SEED_DIR"
+ensure_directories "$SEED_DIR"
 cat <<'EOF' > "$USER_DATA"
 #cloud-config
 users:
@@ -293,7 +327,7 @@ UNATTEND_XML="$UNATTEND_DIR/Autounattend.xml"
 UNATTEND_ISO="$UNATTEND_DIR/autounattend.iso"
 DOWNLOAD_URL={shlex.quote(download_url)}
 
-mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$ISO_STORE" "$IMAGES_DIR/unattend" "$UNATTEND_DIR"
+ensure_directories "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$ISO_STORE" "$IMAGES_DIR/unattend" "$UNATTEND_DIR"
 
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     echo "Virtual machine '$VM_NAME' already exists." >&2

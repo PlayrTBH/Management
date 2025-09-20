@@ -1,13 +1,13 @@
 """Abstractions for controlling QEMU/KVM instances using virsh."""
 from __future__ import annotations
 
-from __future__ import annotations
-
 import html
+import os
 import re
 import shlex
 import textwrap
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, List, Sequence, Tuple
 
 from .ssh import CommandResult, SSHCommandRunner, SSHError
@@ -89,7 +89,29 @@ class VMDeploymentProfile:
         }
 
 
-IMAGE_ROOT = "/var/lib/libvirt/images/playrservers"
+_IMAGE_ROOT_ENV_VAR = "MANAGEMENT_QEMU_IMAGE_ROOT"
+_DEFAULT_IMAGE_ROOT = "/var/lib/libvirt/images/playrservers"
+
+
+def _resolve_image_root() -> str:
+    """Return a validated image root directory for deployment assets."""
+
+    raw_value = os.getenv(_IMAGE_ROOT_ENV_VAR, _DEFAULT_IMAGE_ROOT)
+    if raw_value is None:
+        raw_value = _DEFAULT_IMAGE_ROOT
+    candidate = raw_value.strip()
+    if not candidate:
+        raise ValueError(
+            f"{_IMAGE_ROOT_ENV_VAR} must not be empty when set."
+        )
+
+    path = Path(candidate)
+    if not path.is_absolute():
+        raise ValueError(
+            f"{_IMAGE_ROOT_ENV_VAR} must be set to an absolute path (got {candidate!r})."
+        )
+
+    return str(path)
 
 
 _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
@@ -150,24 +172,26 @@ def _render_ubuntu_deployment_script(
     username: str,
     password: str,
 ) -> str:
-    image_path = f"{IMAGE_ROOT}/cloud/noble-server-cloudimg-amd64.img"
-    disk_path = f"{IMAGE_ROOT}/{vm_name}.qcow2"
-    seed_dir = f"{IMAGE_ROOT}/seed/{vm_name}"
-    user_data = f"{seed_dir}/user-data"
-    meta_data = f"{seed_dir}/meta-data"
+    image_root = _resolve_image_root()
+    image_root_path = Path(image_root)
+    image_path = image_root_path / "cloud" / "noble-server-cloudimg-amd64.img"
+    disk_path = image_root_path / f"{vm_name}.qcow2"
+    seed_dir = image_root_path / "seed" / vm_name
+    user_data = seed_dir / "user-data"
+    meta_data = seed_dir / "meta-data"
     script = f"""
 set -euo pipefail
 
 VM_NAME={shlex.quote(vm_name)}
-IMAGES_DIR={shlex.quote(IMAGE_ROOT)}
-BASE_IMAGE={shlex.quote(image_path)}
-DISK_IMAGE={shlex.quote(disk_path)}
-SEED_DIR={shlex.quote(seed_dir)}
-USER_DATA={shlex.quote(user_data)}
-META_DATA={shlex.quote(meta_data)}
+IMAGES_DIR={shlex.quote(image_root)}
+BASE_IMAGE={shlex.quote(str(image_path))}
+DISK_IMAGE={shlex.quote(str(disk_path))}
+SEED_DIR={shlex.quote(str(seed_dir))}
+USER_DATA={shlex.quote(str(user_data))}
+META_DATA={shlex.quote(str(meta_data))}
 DOWNLOAD_URL={shlex.quote('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img')}
 
-mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed"
+mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$IMAGES_DIR/iso" "$IMAGES_DIR/unattend"
 
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     echo "Virtual machine '$VM_NAME' already exists." >&2
@@ -232,26 +256,28 @@ def _render_windows_deployment_script(
     username: str,
     password: str,
 ) -> str:
-    iso_path = f"{IMAGE_ROOT}/iso/windows-server-2022.iso"
-    disk_path = f"{IMAGE_ROOT}/{vm_name}.qcow2"
-    unattend_dir = f"{IMAGE_ROOT}/unattend/{vm_name}"
-    unattend_xml = f"{unattend_dir}/Autounattend.xml"
-    unattend_iso = f"{unattend_dir}/autounattend.iso"
+    image_root = _resolve_image_root()
+    image_root_path = Path(image_root)
+    iso_path = image_root_path / "iso" / "windows-server-2022.iso"
+    disk_path = image_root_path / f"{vm_name}.qcow2"
+    unattend_dir = image_root_path / "unattend" / vm_name
+    unattend_xml = unattend_dir / "Autounattend.xml"
+    unattend_iso = unattend_dir / "autounattend.iso"
     download_url = "https://software-download.microsoft.com/download/pr/20348.169.210806-2348.fe_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso"
     script = f"""
 set -euo pipefail
 
 VM_NAME={shlex.quote(vm_name)}
-IMAGES_DIR={shlex.quote(IMAGE_ROOT)}
-ISO_STORE={shlex.quote(IMAGE_ROOT + '/iso')}
-ISO_PATH={shlex.quote(iso_path)}
-DISK_IMAGE={shlex.quote(disk_path)}
-UNATTEND_DIR={shlex.quote(unattend_dir)}
-UNATTEND_XML={shlex.quote(unattend_xml)}
-UNATTEND_ISO={shlex.quote(unattend_iso)}
+IMAGES_DIR={shlex.quote(image_root)}
+ISO_STORE={shlex.quote(str(image_root_path / 'iso'))}
+ISO_PATH={shlex.quote(str(iso_path))}
+DISK_IMAGE={shlex.quote(str(disk_path))}
+UNATTEND_DIR={shlex.quote(str(unattend_dir))}
+UNATTEND_XML={shlex.quote(str(unattend_xml))}
+UNATTEND_ISO={shlex.quote(str(unattend_iso))}
 DOWNLOAD_URL={shlex.quote(download_url)}
 
-mkdir -p "$IMAGES_DIR" "$ISO_STORE" "$UNATTEND_DIR"
+mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$ISO_STORE" "$IMAGES_DIR/unattend" "$UNATTEND_DIR"
 
 if virsh dominfo "$VM_NAME" >/dev/null 2>&1; then
     echo "Virtual machine '$VM_NAME' already exists." >&2

@@ -138,3 +138,23 @@ def test_deploy_vm_rejects_invalid_name():
     with pytest.raises(ValueError):
         manager.deploy_vm("ubuntu-24-04", "invalid name")
 
+
+def test_deploy_vm_uses_custom_image_root(monkeypatch, tmp_path):
+    runner = DummyRunner()
+    manager = QEMUManager(runner)
+
+    custom_root = tmp_path / "custom-images"
+    monkeypatch.setenv("MANAGEMENT_QEMU_IMAGE_ROOT", str(custom_root))
+
+    manager.deploy_vm(
+        "ubuntu-24-04",
+        "vm-custom-root",
+        memory_mb=2048,
+        vcpus=2,
+        disk_gb=32,
+    )
+
+    script, _ = extract_script(runner)
+    assert str(custom_root) in script
+    assert str(custom_root / "seed" / "vm-custom-root") in script
+

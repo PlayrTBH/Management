@@ -72,6 +72,56 @@ def test_deploy_vm_windows_generates_unattend_script():
     assert result.exit_status == 0
 
 
+def test_deploy_vm_ubuntu_supports_custom_credentials():
+    runner = DummyRunner()
+    manager = QEMUManager(runner)
+
+    manager.deploy_vm(
+        "ubuntu-24-04",
+        "vm-credentials",
+        memory_mb=2048,
+        vcpus=2,
+        disk_gb=32,
+        username="customadmin",
+        password="SuperSecurePass1!",
+    )
+
+    script, _ = extract_script(runner)
+    assert "name: customadmin" in script
+    assert "customadmin:SuperSecurePass1!" in script
+
+
+def test_deploy_vm_windows_supports_custom_credentials():
+    runner = DummyRunner()
+    manager = QEMUManager(runner)
+
+    manager.deploy_vm(
+        "windows-server-2022",
+        "win-credentials",
+        memory_mb=4096,
+        vcpus=4,
+        disk_gb=80,
+        username="customadmin",
+        password="SuperSecurePass1!",
+    )
+
+    script, _ = extract_script(runner)
+    assert "<Name>customadmin</Name>" in script
+    assert script.count("SuperSecurePass1!") >= 2
+
+
+def test_deploy_vm_rejects_invalid_password_length():
+    runner = DummyRunner()
+    manager = QEMUManager(runner)
+
+    with pytest.raises(ValueError):
+        manager.deploy_vm(
+            "ubuntu-24-04",
+            "vm-invalid-password",
+            password="short",
+        )
+
+
 def test_deploy_vm_rejects_unknown_profile():
     runner = DummyRunner()
     manager = QEMUManager(runner)

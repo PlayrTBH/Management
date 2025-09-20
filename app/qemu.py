@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from __future__ import annotations
 
+import html
 import re
 import shlex
 import textwrap
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Sequence
+from typing import Callable, Dict, List, Sequence, Tuple
 
 from .ssh import CommandResult, SSHCommandRunner, SSHError
 
@@ -27,7 +28,7 @@ class VMInfo:
     id: str | None
 
 
-ScriptBuilder = Callable[[str, int, int, int], str]
+ScriptBuilder = Callable[[str, int, int, int, str, str], str]
 
 
 @dataclass(frozen=True)
@@ -49,8 +50,27 @@ class VMDeploymentProfile:
     notes: str | None = None
     timeout_seconds: int = 900
 
-    def build_script(self, vm_name: str, memory_mb: int, vcpus: int, disk_gb: int) -> str:
-        return self._builder(vm_name, memory_mb, vcpus, disk_gb)
+    def build_script(
+        self,
+        vm_name: str,
+        memory_mb: int,
+        vcpus: int,
+        disk_gb: int,
+        username: str,
+        password: str,
+    ) -> str:
+        return self._builder(vm_name, memory_mb, vcpus, disk_gb, username, password)
+
+    def resolve_credentials(
+        self,
+        username: str | None,
+        password: str | None,
+    ) -> Tuple[str, str]:
+        candidate_username = _clean_optional(username) or self.default_username
+        candidate_password = _clean_optional(password) or self.default_password
+        resolved_username = _sanitize_username(candidate_username)
+        resolved_password = _sanitize_password(candidate_password)
+        return resolved_username, resolved_password
 
     def to_public_dict(self) -> Dict[str, object]:
         return {
@@ -72,6 +92,20 @@ class VMDeploymentProfile:
 IMAGE_ROOT = "/var/lib/libvirt/images/playrservers"
 
 
+_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned
+
+
 def _sanitize_vm_name(name: str) -> str:
     cleaned = name.strip()
     if not cleaned:
@@ -81,7 +115,41 @@ def _sanitize_vm_name(name: str) -> str:
     return cleaned
 
 
-def _render_ubuntu_deployment_script(vm_name: str, memory_mb: int, vcpus: int, disk_gb: int) -> str:
+def _sanitize_username(username: str) -> str:
+    cleaned = username.strip()
+    if not cleaned:
+        raise ValueError("Username must not be empty.")
+    if not _USERNAME_PATTERN.fullmatch(cleaned):
+        raise ValueError(
+            "Username may only include letters, numbers, dots, dashes, and underscores, and must be at most 32 characters."
+        )
+    return cleaned
+
+
+def _sanitize_password(password: str) -> str:
+    if not isinstance(password, str):
+        raise ValueError("Password must be a string.")
+    if any(ch in password for ch in "\r\n"):
+        raise ValueError("Password must not contain newline characters.")
+    if any(ch.isspace() for ch in password):
+        raise ValueError("Password must not contain whitespace characters.")
+    if ":" in password:
+        raise ValueError("Password must not contain colon characters.")
+    if len(password) < 12:
+        raise ValueError("Password must be at least 12 characters long.")
+    if len(password) > 128:
+        raise ValueError("Password must not exceed 128 characters.")
+    return password
+
+
+def _render_ubuntu_deployment_script(
+    vm_name: str,
+    memory_mb: int,
+    vcpus: int,
+    disk_gb: int,
+    username: str,
+    password: str,
+) -> str:
     image_path = f"{IMAGE_ROOT}/cloud/noble-server-cloudimg-amd64.img"
     disk_path = f"{IMAGE_ROOT}/{vm_name}.qcow2"
     seed_dir = f"{IMAGE_ROOT}/seed/{vm_name}"
@@ -123,7 +191,7 @@ mkdir -p "$SEED_DIR"
 cat <<'EOF' > "$USER_DATA"
 #cloud-config
 users:
-  - name: playradmin
+  - name: {username}
     sudo: ALL=(ALL) NOPASSWD:ALL
     groups: sudo
     shell: /bin/bash
@@ -131,7 +199,7 @@ users:
 chpasswd:
   expire: false
   list: |
-    playradmin:PlayrServers!23
+    {username}:{password}
 ssh_pwauth: true
 EOF
 
@@ -156,7 +224,14 @@ virt-install \
     return textwrap.dedent(script).strip()
 
 
-def _render_windows_deployment_script(vm_name: str, memory_mb: int, vcpus: int, disk_gb: int) -> str:
+def _render_windows_deployment_script(
+    vm_name: str,
+    memory_mb: int,
+    vcpus: int,
+    disk_gb: int,
+    username: str,
+    password: str,
+) -> str:
     iso_path = f"{IMAGE_ROOT}/iso/windows-server-2022.iso"
     disk_path = f"{IMAGE_ROOT}/{vm_name}.qcow2"
     unattend_dir = f"{IMAGE_ROOT}/unattend/{vm_name}"
@@ -275,16 +350,16 @@ cat > "$UNATTEND_XML" <<'EOF'
       </OOBE>
       <UserAccounts>
         <AdministratorPassword>
-          <Value>PlayrServers!23</Value>
+          <Value>{html.escape(password, quote=True)}</Value>
           <PlainText>true</PlainText>
         </AdministratorPassword>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>playradmin</Name>
+            <Name>{html.escape(username, quote=True)}</Name>
             <DisplayName>Playr Admin</DisplayName>
             <Group>Administrators</Group>
             <Password>
-              <Value>PlayrServers!23</Value>
+              <Value>{html.escape(password, quote=True)}</Value>
               <PlainText>true</PlainText>
             </Password>
           </LocalAccount>
@@ -423,12 +498,16 @@ class QEMUManager:
         memory_mb: int | None = None,
         vcpus: int | None = None,
         disk_gb: int | None = None,
+        username: str | None = None,
+        password: str | None = None,
     ) -> CommandResult:
         profile = get_vm_deployment_profile(profile_id)
         if profile is None:
             raise ValueError("Unknown deployment profile requested.")
 
         cleaned_name = _sanitize_vm_name(vm_name)
+
+        resolved_username, resolved_password = profile.resolve_credentials(username, password)
 
         def _coerce(value: int | None, default: int, label: str) -> int:
             try:
@@ -443,7 +522,14 @@ class QEMUManager:
         resolved_vcpus = _coerce(vcpus, profile.default_vcpus, "vCPU count")
         resolved_disk = _coerce(disk_gb, profile.default_disk_gb, "Disk size (GiB)")
 
-        script = profile.build_script(cleaned_name, resolved_memory, resolved_vcpus, resolved_disk)
+        script = profile.build_script(
+            cleaned_name,
+            resolved_memory,
+            resolved_vcpus,
+            resolved_disk,
+            resolved_username,
+            resolved_password,
+        )
 
         try:
             result = self._runner.run(["bash", "-lc", script], timeout=profile.timeout_seconds)

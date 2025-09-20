@@ -918,12 +918,22 @@ def create_app(
         memory_mb = payload.get("memory_mb")
         vcpus = payload.get("vcpus")
         disk_gb = payload.get("disk_gb")
+        username = payload.get("username")
+        password = payload.get("password")
 
         profile = get_vm_deployment_profile(profile_id)
         if profile is None:
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={"status": "error", "message": "Unknown deployment profile."},
+            )
+
+        try:
+            resolved_username, resolved_password = profile.resolve_credentials(username, password)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
             )
 
         manager = _build_qemu_manager(agent)
@@ -935,6 +945,8 @@ def create_app(
                 memory_mb=memory_mb,
                 vcpus=vcpus,
                 disk_gb=disk_gb,
+                username=resolved_username,
+                password=resolved_password,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -990,8 +1002,8 @@ def create_app(
                 "disk_gb": resolved_disk,
             },
             "credentials": {
-                "username": profile.default_username,
-                "password": profile.default_password,
+                "username": resolved_username,
+                "password": resolved_password,
             },
             "result": _command_result_payload(result),
         }

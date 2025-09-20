@@ -93,9 +93,8 @@ def test_management_page_renders_with_registered_agent(tmp_path):
         agents_payload = json.loads(match.group(1))
         assert agents_payload
         assert agents_payload[0]["id"] == agent.id
-        assert (
-            agents_payload[0]["remove_url"]
-            == f"http://testserver/management/agents/{agent.id}/delete"
+        assert agents_payload[0]["remove_url"] == (
+            f"/management/agents/{agent.id}/delete"
         )
 
 

@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -195,3 +196,31 @@ def test_deploy_endpoint_reports_qemu_error(app):
         payload = response.json()
         assert payload["status"] == "error"
         assert "result" in payload
+
+
+def test_deploy_endpoint_logs_qemu_error_details(app, caplog):
+    error_result = CommandResult(
+        command=["bash", "-lc", "deploy"],
+        exit_status=2,
+        stdout="deployment output",
+        stderr="deployment failure",
+    )
+    manager = StubManager(error=QEMUError("boom", error_result))
+    app.state.qemu_manager_factory = lambda agent: manager
+
+    with TestClient(app) as client:
+        authenticate(client)
+        caplog.set_level(logging.ERROR, logger="playrservers.management.deployments")
+        response = client.post(
+            "/management/agents/1/deployments",
+            json={"profile_id": "ubuntu-24-04", "vm_name": "vm-theta"},
+        )
+
+    assert response.status_code == 502
+    assert any(
+        "VM deployment failed for 'vm-theta'" in record.message
+        and "profile 'ubuntu-24-04'" in record.message
+        and "exit_status=2" in record.message
+        and "stderr='deployment failure'" in record.message
+        for record in caplog.records
+    )

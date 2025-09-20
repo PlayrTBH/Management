@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import os
 import shlex
 from contextlib import suppress
@@ -37,6 +38,9 @@ from .ssh import (
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 PASSWORD_MIN_LENGTH = 12
+
+
+logger = logging.getLogger("playrservers.management.deployments")
 
 
 def create_app(
@@ -965,9 +969,34 @@ def create_app(
                 },
             )
         except QEMUError as exc:
-            error_payload: Dict[str, object] = {"status": "error", "message": str(exc)}
+            result_payload = None
             if getattr(exc, "result", None) is not None:
-                error_payload["result"] = _command_result_payload(exc.result)
+                result_payload = _command_result_payload(exc.result)
+
+            log_message = str(exc)
+            if result_payload is not None:
+                log_message = (
+                    f"{log_message} "
+                    f"(exit_status={result_payload['exit_status']}, "
+                    f"stdout={result_payload['stdout']!r}, "
+                    f"stderr={result_payload['stderr']!r})"
+                )
+
+            logger.error(
+                "VM deployment failed for '%s' on agent '%s' (id=%d, %s@%s:%s) using profile '%s': %s",
+                vm_name,
+                agent.name,
+                agent.id,
+                agent.username,
+                agent.hostname,
+                agent.port,
+                profile.id,
+                log_message,
+            )
+
+            error_payload: Dict[str, object] = {"status": "error", "message": str(exc)}
+            if result_payload is not None:
+                error_payload["result"] = result_payload
             return JSONResponse(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 content=error_payload,

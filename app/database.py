@@ -157,6 +157,13 @@ class Database:
         user = User(id=int(user_id), name=normalized_name, email=normalized_email, created_at=created_at)
         return user
 
+    def has_users(self) -> bool:
+        """Return ``True`` if any user accounts exist in the database."""
+
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+        return row is not None
+
     def get_user(self, user_id: int) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()

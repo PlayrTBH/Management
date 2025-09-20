@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -94,31 +95,125 @@ def initialise_database(db_path_arg: str | None) -> tuple[Database, Path]:
     return database, resolved_path
 
 
-def prompt_for_non_empty(prompt: str) -> str:
+@contextlib.contextmanager
+def _temporary_stdio(stdin: TextIO | None, stdout: TextIO | None):
+    """Temporarily replace ``sys.stdin`` and ``sys.stdout``."""
+
+    original_stdin, original_stdout = sys.stdin, sys.stdout
+    try:
+        if stdin is not None:
+            sys.stdin = stdin
+        if stdout is not None:
+            sys.stdout = stdout
+        yield
+    finally:
+        sys.stdin = original_stdin
+        sys.stdout = original_stdout
+
+
+def _prompt_input(
+    prompt: str,
+    *,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    password: bool = False,
+) -> str:
+    """Invoke ``input``/``getpass`` using optional replacement streams."""
+
+    func = getpass.getpass if password else input
+    if stdin is None and stdout is None:
+        return func(prompt)
+
+    with _temporary_stdio(stdin, stdout):
+        return func(prompt)
+
+
+def _print_prompt_message(message: str, stdout: TextIO | None) -> None:
+    """Print a message to the prompt stream (and log to stdout when different)."""
+
+    if stdout is None or stdout is sys.stdout:
+        print(message, flush=True)
+        return
+
+    print(message, file=stdout, flush=True)
+    print(message, flush=True)
+
+
+@contextlib.contextmanager
+def _interactive_prompt_io() -> tuple[TextIO | None, TextIO | None]:
+    """Provide streams suitable for prompting the user.
+
+    When the current standard input/output are already interactive, ``None`` is
+    yielded for both streams so that the default ``input``/``print`` behaviour is
+    preserved. Otherwise a handle to the controlling terminal is opened to allow
+    interactive prompting even though ``sys.stdin`` is not a TTY.
+    """
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        yield None, None
+        return
+
+    tty_path = "CONIN$" if os.name == "nt" else "/dev/tty"
+    try:
+        if os.name == "nt":
+            tty_in = open(tty_path, "r", encoding="utf-8", buffering=1)
+            tty_out = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+        else:
+            tty_in = tty_out = open(tty_path, "r+", encoding="utf-8", buffering=1)
+    except OSError as exc:
+        raise UserInputError(
+            "Unable to prompt for initial user details because a controlling terminal "
+            "could not be accessed. Re-run the installer with --admin-name, "
+            "--admin-email, and --admin-password."
+        ) from exc
+
+    try:
+        yield tty_in, tty_out
+    finally:
+        tty_in.close()
+        if tty_out is not tty_in:
+            tty_out.close()
+
+
+def prompt_for_non_empty(
+    prompt: str, *, stdin: TextIO | None = None, stdout: TextIO | None = None
+) -> str:
     while True:
         try:
-            value = input(prompt)
+            value = _prompt_input(prompt, stdin=stdin, stdout=stdout)
         except EOFError as exc:
             raise UserInputError("Input stream closed while waiting for a response.") from exc
 
         value = value.strip()
         if value:
             return value
-        print("Value must not be empty. Please try again.")
+        _print_prompt_message("Value must not be empty. Please try again.", stdout)
 
 
-def prompt_for_password() -> str:
+def prompt_for_password(
+    *, stdin: TextIO | None = None, stdout: TextIO | None = None
+) -> str:
     while True:
         try:
-            password = getpass.getpass("Password (minimum 12 characters): ")
-            confirm = getpass.getpass("Confirm password: ")
+            password = _prompt_input(
+                "Password (minimum 12 characters): ",
+                stdin=stdin,
+                stdout=stdout,
+                password=True,
+            )
+            confirm = _prompt_input(
+                "Confirm password: ",
+                stdin=stdin,
+                stdout=stdout,
+                password=True,
+            )
         except EOFError as exc:
             raise UserInputError("Input stream closed while reading the password.") from exc
         if password != confirm:
-            print("Passwords do not match. Please try again.")
+            _print_prompt_message("Passwords do not match. Please try again.", stdout)
             continue
         if len(password) < 12:
-            print("Password must be at least 12 characters long.")
+            _print_prompt_message("Password must be at least 12 characters long.", stdout)
             continue
         return password
 
@@ -174,30 +269,45 @@ def create_initial_user(
         print(f"\nCreated user #{user.id}: {user.name} <{user.email}>")
         return
 
-    print("\nNo users were found in the database. Let's create the first account.")
-    if not sys.stdin.isatty():
-        raise UserInputError(
-            "Unable to prompt for initial user details because standard input is not interactive. "
-            "Re-run the installer with --admin-name, --admin-email, and --admin-password.",
+    with _interactive_prompt_io() as (prompt_stdin, prompt_stdout):
+        _print_prompt_message(
+            "\nNo users were found in the database. Let's create the first account.",
+            prompt_stdout,
         )
-    while True:
-        name = prompt_for_non_empty("Display name: ")
-        email = prompt_for_non_empty("Email address (used for login): ").lower()
+        while True:
+            name = prompt_for_non_empty(
+                "Display name: ", stdin=prompt_stdin, stdout=prompt_stdout
+            )
+            email = (
+                prompt_for_non_empty(
+                    "Email address (used for login): ",
+                    stdin=prompt_stdin,
+                    stdout=prompt_stdout,
+                ).lower()
+            )
 
-        if database.get_user_by_email(email):
-            print("A user with that email already exists. Please choose a different email address.")
-            continue
+            if database.get_user_by_email(email):
+                _print_prompt_message(
+                    "A user with that email already exists. Please choose a different "
+                    "email address.",
+                    prompt_stdout,
+                )
+                continue
 
-        password = prompt_for_password()
+            password = prompt_for_password(
+                stdin=prompt_stdin, stdout=prompt_stdout
+            )
 
-        try:
-            user = database.create_user(name, email, password)
-        except ValueError as exc:
-            print(f"Failed to create user: {exc}")
-            continue
+            try:
+                user = database.create_user(name, email, password)
+            except ValueError as exc:
+                _print_prompt_message(f"Failed to create user: {exc}", prompt_stdout)
+                continue
 
-        print(f"\nCreated user #{user.id}: {user.name} <{user.email}>")
-        break
+            _print_prompt_message(
+                f"\nCreated user #{user.id}: {user.name} <{user.email}>", prompt_stdout
+            )
+            break
 
 
 def main() -> int:

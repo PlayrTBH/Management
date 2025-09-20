@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+
 import pytest
 
 from app.database import Database
@@ -57,13 +60,45 @@ def test_create_initial_user_cli_short_password(tmp_path):
         )
 
 
-def test_create_initial_user_requires_interactive_stdin(tmp_path, monkeypatch):
+def test_create_initial_user_prompts_when_stdin_not_interactive(tmp_path, monkeypatch):
     database = _initialised_database(tmp_path)
 
     monkeypatch.setattr("scripts.install_service.sys.stdin.isatty", lambda: False)
 
-    with pytest.raises(UserInputError):
-        create_initial_user(database)
+    prompts = iter([
+        "Service Admin",
+        "admin@example.com",
+    ])
+    passwords = iter(["supersecurepw"])
+
+    captured_calls = []
+
+    def fake_prompt_for_non_empty(prompt, *, stdin=None, stdout=None):  # pragma: no cover - exercised in test
+        captured_calls.append((stdin, stdout))
+        return next(prompts)
+
+    def fake_prompt_for_password(*, stdin=None, stdout=None):  # pragma: no cover - exercised in test
+        captured_calls.append((stdin, stdout))
+        return next(passwords)
+
+    monkeypatch.setattr("scripts.install_service.prompt_for_non_empty", fake_prompt_for_non_empty)
+    monkeypatch.setattr("scripts.install_service.prompt_for_password", fake_prompt_for_password)
+
+    fake_stdin = object()
+    fake_stdout = io.StringIO()
+
+    @contextlib.contextmanager
+    def fake_prompt_io():
+        yield fake_stdin, fake_stdout
+
+    monkeypatch.setattr("scripts.install_service._interactive_prompt_io", fake_prompt_io)
+
+    create_initial_user(database)
+
+    stored = database.get_user_by_email("admin@example.com")
+    assert stored is not None
+    assert stored.name == "Service Admin"
+    assert all(call == (fake_stdin, fake_stdout) for call in captured_calls)
 
 
 def test_prompt_for_non_empty_eof(monkeypatch):

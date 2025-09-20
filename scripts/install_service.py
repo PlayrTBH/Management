@@ -40,6 +40,24 @@ def parse_args() -> argparse.Namespace:
             "Provide them as a quoted string, e.g. --pip-extra-args='--proxy=http://proxy:3128'"
         ),
     )
+    parser.add_argument(
+        "--admin-name",
+        dest="admin_name",
+        default=None,
+        help="Display name for the initial administrator account (non-interactive mode)",
+    )
+    parser.add_argument(
+        "--admin-email",
+        dest="admin_email",
+        default=None,
+        help="Email address for the initial administrator account (non-interactive mode)",
+    )
+    parser.add_argument(
+        "--admin-password",
+        dest="admin_password",
+        default=None,
+        help="Password for the initial administrator account (non-interactive mode)",
+    )
     return parser.parse_args()
 
 
@@ -93,9 +111,55 @@ def prompt_for_password() -> str:
         return password
 
 
-def create_initial_user(database: Database) -> None:
+def _normalize_cli_user_details(
+    name: str | None, email: str | None, password: str | None
+) -> tuple[str, str, str] | None:
+    """Validate and normalise CLI-supplied user details."""
+
+    if name is None and email is None and password is None:
+        return None
+
+    pairs = (("name", name), ("email", email), ("password", password))
+    missing = [field for field, value in pairs if value is None]
+    if missing:
+        missing_fields = ", ".join(f"--admin-{field}" for field in missing)
+        raise ValueError(
+            "All of --admin-name, --admin-email, and --admin-password must be provided together. "
+            f"Missing {missing_fields}."
+        )
+
+    normalized_name = name.strip() if name else ""
+    normalized_email = email.strip().lower() if email else ""
+    if not normalized_name:
+        raise ValueError("--admin-name must not be empty")
+    if not normalized_email:
+        raise ValueError("--admin-email must not be empty")
+    if password is None or len(password) < 12:
+        raise ValueError("--admin-password must be at least 12 characters long")
+
+    return normalized_name, normalized_email, password
+
+
+def create_initial_user(
+    database: Database,
+    *,
+    admin_name: str | None = None,
+    admin_email: str | None = None,
+    admin_password: str | None = None,
+) -> None:
     if database.has_users():
         print("Existing users detected; skipping initial user creation.")
+        return
+
+    cli_user = _normalize_cli_user_details(admin_name, admin_email, admin_password)
+    if cli_user is not None:
+        name, email, password = cli_user
+        try:
+            user = database.create_user(name, email, password)
+        except ValueError as exc:
+            raise ValueError(f"Failed to create user: {exc}") from exc
+
+        print(f"\nCreated user #{user.id}: {user.name} <{user.email}>")
         return
 
     print("\nNo users were found in the database. Let's create the first account.")
@@ -127,7 +191,12 @@ def main() -> int:
         if not args.skip_deps:
             install_dependencies(pip_args)
         database, db_path = initialise_database(args.db_path)
-        create_initial_user(database)
+        create_initial_user(
+            database,
+            admin_name=args.admin_name,
+            admin_email=args.admin_email,
+            admin_password=args.admin_password,
+        )
     except subprocess.CalledProcessError as exc:
         cmd = exc.cmd
         if isinstance(cmd, (list, tuple)):
@@ -136,6 +205,9 @@ def main() -> int:
             cmd_display = str(cmd)
         print(f"Command failed with exit code {exc.returncode}: {cmd_display}", file=sys.stderr)
         return exc.returncode or 1
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("\nInstallation aborted by user.")
         return 1

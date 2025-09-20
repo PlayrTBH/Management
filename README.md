@@ -31,6 +31,19 @@ python scripts/install_service.py
 Use `--skip-deps` if you prefer to manage Python packages yourself. When the
 script completes you can start the API with `python main.py serve`.
 
+To run the installer without interactive prompts, provide the initial account
+details via flags:
+
+```bash
+python scripts/install_service.py \
+  --admin-name "Service Admin" \
+  --admin-email admin@example.com \
+  --admin-password "your-strong-password"
+```
+
+All three options must be supplied together, and the password must be at least
+12 characters long.
+
 ### Manual setup
 
 Create a virtual environment and install the web-service dependencies:

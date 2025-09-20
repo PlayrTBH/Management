@@ -48,6 +48,11 @@ async def stream_ssh_channel(
                 pass
         with suppress(Exception):
             await anyio.to_thread.run_sync(channel.close, abandon_on_cancel=True)
+            if hasattr(channel, "closed"):
+                try:
+                    setattr(channel, "closed", True)
+                except Exception:
+                    pass
         with suppress(Exception):
             if websocket.application_state != WebSocketState.DISCONNECTED:
                 await websocket.close()
@@ -115,6 +120,7 @@ async def stream_ssh_channel(
                         await anyio.to_thread.run_sync(channel.resize_pty, width, height)
                     continue
                 if message_type == "close":
+                    await cleanup()
                     break
         except (WebSocketDisconnect, cancel_exc):
             pass

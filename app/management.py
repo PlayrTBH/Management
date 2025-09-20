@@ -13,12 +13,15 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import anyio
+import websockets
 from fastapi import FastAPI, Form, Request, WebSocket, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from httpx import URL
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from starlette.websockets import WebSocketState
+from starlette.websockets import WebSocketDisconnect, WebSocketState
+from urllib.parse import quote
 
 from .database import Database, resolve_database_path
 from .deployments import DeploymentLogManager
@@ -38,6 +41,7 @@ from .ssh import (
     SSHError,
 )
 from .terminals import send_websocket_json, stream_ssh_channel
+from .api_runner import APICommandRunner
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -166,6 +170,116 @@ def create_app(
             return None
         return _fetch_user(user_id)
 
+    def _resolve_api_base_url() -> str:
+        base = getattr(app.state, "public_api_url", "")
+        if not isinstance(base, str) or not base.strip():
+            raise RuntimeError("Public API URL is not configured")
+        return base.strip().rstrip("/")
+
+    def _build_api_http_url(path: str) -> str:
+        base = _resolve_api_base_url()
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{base}{path}"
+
+    def _build_api_websocket_url(path: str) -> str:
+        url = URL(_build_api_http_url(path))
+        scheme = "wss" if url.scheme == "https" else "ws" if url.scheme == "http" else url.scheme
+        return str(url.copy_with(scheme=scheme))
+
+    async def _proxy_api_websocket(
+        websocket: WebSocket,
+        *,
+        path: str,
+        user: User,
+    ) -> None:
+        try:
+            api_key = _get_user_api_key(user)
+            relay_url = _build_api_websocket_url(path)
+        except RuntimeError as exc:
+            await websocket.accept()
+            await send_websocket_json(
+                websocket,
+                {"type": "error", "message": str(exc)},
+            )
+            with suppress(Exception):
+                await websocket.close()
+            return
+
+        await websocket.accept()
+
+        try:
+            async with websockets.connect(
+                relay_url,
+                extra_headers={"Authorization": f"Bearer {api_key}"},
+            ) as remote:
+                cancel_exc = anyio.get_cancelled_exc_class()
+
+                async with anyio.create_task_group() as task_group:
+                    async def pump_client() -> None:
+                        try:
+                            while True:
+                                message = await websocket.receive()
+                                if message["type"] == "websocket.disconnect":
+                                    await remote.close()
+                                    break
+                                data = message.get("bytes")
+                                if data is not None:
+                                    if data:
+                                        await remote.send(data)
+                                    continue
+                                text = message.get("text")
+                                if text is not None:
+                                    await remote.send(text)
+                        except (WebSocketDisconnect, cancel_exc):
+                            pass
+                        except Exception:
+                            pass
+                        finally:
+                            task_group.cancel_scope.cancel()
+
+                    async def pump_remote() -> None:
+                        try:
+                            while True:
+                                data = await remote.recv()
+                                if isinstance(data, bytes):
+                                    if data:
+                                        await websocket.send_bytes(data)
+                                    else:
+                                        await websocket.send_bytes(data)
+                                    continue
+                                if data is None:
+                                    break
+                                await websocket.send_text(data)
+                        except cancel_exc:
+                            pass
+                        except websockets.ConnectionClosed:
+                            pass
+                        except Exception:
+                            pass
+                        finally:
+                            task_group.cancel_scope.cancel()
+
+                    task_group.start_soon(pump_client)
+                    task_group.start_soon(pump_remote)
+        except websockets.InvalidStatusCode as exc:
+            await send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": f"SSH relay rejected the connection (status {exc.status_code}).",
+                },
+            )
+        except Exception as exc:
+            await send_websocket_json(
+                websocket,
+                {"type": "error", "message": f"Failed to establish SSH relay: {exc}"},
+            )
+        finally:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                with suppress(Exception):
+                    await websocket.close()
+
     def _build_target(agent: Agent) -> SSHTarget:
         return SSHTarget(
             hostname=agent.hostname,
@@ -177,13 +291,43 @@ def create_app(
             known_hosts_path=Path(agent.known_hosts_path).expanduser() if agent.known_hosts_path else None,
         )
 
-    def _build_ssh_runner(agent: Agent) -> SSHCommandRunner:
+    def _get_user_api_key(user: User) -> str:
+        api_key = database.get_user_api_key(user.id)
+        if not api_key:
+            raise RuntimeError(
+                "API key not available for this account. Rotate the key from the account page."
+            )
+        return api_key
+
+    def _api_runner_for(agent: Agent, user: User | None) -> APICommandRunner:
+        if user is None:
+            raise RuntimeError("User context required for API-backed SSH runner")
+
+        api_key = _get_user_api_key(user)
+
+        base_url = _resolve_api_base_url()
+
+        return APICommandRunner(
+            base_url,
+            api_key,
+            agent_id=agent.id,
+            hostname=agent.hostname,
+            port=agent.port,
+        )
+
+    def _build_ssh_runner(agent: Agent, *, user: User | None = None) -> SSHCommandRunner:
         override = getattr(app.state, "ssh_runner_factory", None)
         if callable(override):
-            runner = override(agent)
+            try:
+                runner = override(agent, user=user)
+            except TypeError:
+                runner = override(agent)
             if runner is None:
                 raise RuntimeError("SSH runner override must return a runner instance")
             return runner
+
+        if user is not None:
+            return _api_runner_for(agent, user)
 
         target = _build_target(agent)
         factory = SSHClientFactory(target)
@@ -201,15 +345,18 @@ def create_app(
         factory = SSHClientFactory(target)
         return factory.open_shell()
 
-    def _build_qemu_manager(agent: Agent) -> QEMUManager:
+    def _build_qemu_manager(agent: Agent, *, user: User | None = None) -> QEMUManager:
         override = getattr(app.state, "qemu_manager_factory", None)
         if callable(override):
-            manager = override(agent)
+            try:
+                manager = override(agent, user=user)
+            except TypeError:
+                manager = override(agent)
             if manager is None:
                 raise RuntimeError("QEMU manager override must return a manager instance")
             return manager
 
-        runner = _build_ssh_runner(agent)
+        runner = _build_ssh_runner(agent, user=user)
         return QEMUManager(runner)
 
     def _get_deployment_logs() -> DeploymentLogManager:
@@ -685,7 +832,13 @@ def create_app(
         if agent is None:
             return _json_agent_missing()
 
-        manager = _build_qemu_manager(agent)
+        try:
+            manager = _build_qemu_manager(agent, user=user)
+        except RuntimeError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
+            )
         try:
             vms = manager.list_vms()
         except HostKeyVerificationError as exc:
@@ -725,7 +878,13 @@ def create_app(
         if agent is None:
             return _json_agent_missing()
 
-        manager = _build_qemu_manager(agent)
+        try:
+            manager = _build_qemu_manager(agent, user=user)
+        except RuntimeError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
+            )
         try:
             result = manager.get_vm_info(vm_name)
         except HostKeyVerificationError as exc:
@@ -763,7 +922,13 @@ def create_app(
         if agent is None:
             return _json_agent_missing()
 
-        manager = _build_qemu_manager(agent)
+        try:
+            manager = _build_qemu_manager(agent, user=user)
+        except RuntimeError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
+            )
         operations = {
             "start": manager.start_vm,
             "shutdown": manager.shutdown_vm,
@@ -891,7 +1056,13 @@ def create_app(
             f"Deployment queued on {agent.name} ({agent.hostname}).",
         )
 
-        manager = _build_qemu_manager(agent)
+        try:
+            manager = _build_qemu_manager(agent, user=user)
+        except RuntimeError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
+            )
 
         async def run_deployment_task():
             deployment_logs.mark_running(record.id)
@@ -1055,38 +1226,66 @@ def create_app(
             await websocket.close(code=4404)
             return
 
-        await websocket.accept()
-
-        try:
-            with _build_ssh_terminal(agent) as channel:
+        override = getattr(app.state, "ssh_terminal_factory", None)
+        if callable(override):
+            try:
+                terminal = override(agent, user=user)
+            except TypeError:
+                terminal = override(agent)
+            if terminal is None:
+                await websocket.accept()
                 await send_websocket_json(
                     websocket,
-                    {"type": "status", "status": "connected"},
+                    {
+                        "type": "error",
+                        "message": "SSH terminal override must return a context manager.",
+                    },
                 )
-                await stream_ssh_channel(websocket, channel)
-        except HostKeyVerificationError as exc:
-            await send_websocket_json(
-                websocket,
-                {
-                    "type": "error",
-                    "message": str(exc),
-                    "code": "host_key_verification_failed",
-                },
-            )
-        except (SSHError, RuntimeError) as exc:
-            await send_websocket_json(websocket, {"type": "error", "message": str(exc)})
-        except Exception:
-            await send_websocket_json(
-                websocket,
-                {
-                    "type": "error",
-                    "message": "SSH session terminated unexpectedly.",
-                },
-            )
-        finally:
-            if websocket.client_state != WebSocketState.DISCONNECTED:
                 with suppress(Exception):
                     await websocket.close()
+                return
+
+            await websocket.accept()
+
+            try:
+                with terminal as channel:
+                    await send_websocket_json(
+                        websocket,
+                        {"type": "status", "status": "connected"},
+                    )
+                    await stream_ssh_channel(websocket, channel)
+            except HostKeyVerificationError as exc:
+                await send_websocket_json(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": str(exc),
+                        "code": "host_key_verification_failed",
+                    },
+                )
+            except (SSHError, RuntimeError) as exc:
+                await send_websocket_json(
+                    websocket, {"type": "error", "message": str(exc)}
+                )
+            except Exception:
+                await send_websocket_json(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": "SSH session terminated unexpectedly.",
+                    },
+                )
+            finally:
+                if websocket.client_state != WebSocketState.DISCONNECTED:
+                    with suppress(Exception):
+                        await websocket.close()
+            return
+
+        await _proxy_api_websocket(
+            websocket,
+            path=f"/agents/{agent.id}/terminal",
+            user=user,
+        )
 
     @app.websocket(
         "/management/agents/{agent_id}/vms/{vm_name}/console",
@@ -1108,48 +1307,73 @@ def create_app(
             await websocket.close(code=4404)
             return
 
-        await websocket.accept()
-
-        try:
-            with _build_ssh_terminal(agent) as channel:
-                command = f"virsh console --force {shlex.quote(cleaned_vm_name)}\n"
-                await anyio.to_thread.run_sync(channel.send, command.encode("utf-8"))
-
-                async def detach_console():
-                    with suppress(Exception):
-                        await anyio.to_thread.run_sync(channel.send, b"\x1d\n")
-                        await anyio.to_thread.run_sync(channel.send, b"exit\n")
-
+        override = getattr(app.state, "ssh_terminal_factory", None)
+        if callable(override):
+            try:
+                terminal = override(agent, user=user)
+            except TypeError:
+                terminal = override(agent)
+            if terminal is None:
+                await websocket.accept()
                 await send_websocket_json(
                     websocket,
-                    {"type": "status", "status": "connected", "vm": cleaned_vm_name},
+                    {
+                        "type": "error",
+                        "message": "SSH terminal override must return a context manager.",
+                    },
                 )
-                await stream_ssh_channel(websocket, channel, on_close=detach_console)
-        except HostKeyVerificationError as exc:
-            await send_websocket_json(
-                websocket,
-                {
-                    "type": "error",
-                    "message": str(exc),
-                    "code": "host_key_verification_failed",
-                },
-            )
-        except (SSHError, RuntimeError) as exc:
-            await send_websocket_json(
-                websocket, {"type": "error", "message": str(exc)}
-            )
-        except Exception:
-            await send_websocket_json(
-                websocket,
-                {
-                    "type": "error",
-                    "message": "Console session terminated unexpectedly.",
-                },
-            )
-        finally:
-            if websocket.client_state != WebSocketState.DISCONNECTED:
                 with suppress(Exception):
                     await websocket.close()
+                return
+
+            await websocket.accept()
+
+            try:
+                with terminal as channel:
+                    command = f"virsh console --force {shlex.quote(cleaned_vm_name)}\n"
+                    await anyio.to_thread.run_sync(
+                        channel.send, command.encode("utf-8")
+                    )
+
+                    async def detach_console():
+                        with suppress(Exception):
+                            await anyio.to_thread.run_sync(channel.send, b"\x1d\n")
+                            await anyio.to_thread.run_sync(channel.send, b"exit\n")
+
+                    await send_websocket_json(
+                        websocket,
+                        {"type": "status", "status": "connected", "vm": cleaned_vm_name},
+                    )
+                    await stream_ssh_channel(websocket, channel, on_close=detach_console)
+            except HostKeyVerificationError as exc:
+                await send_websocket_json(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": str(exc),
+                        "code": "host_key_verification_failed",
+                    },
+                )
+            except (SSHError, RuntimeError) as exc:
+                await send_websocket_json(
+                    websocket, {"type": "error", "message": str(exc)}
+                )
+            except Exception:
+                await send_websocket_json(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": "Console session terminated unexpectedly.",
+                    },
+                )
+            finally:
+                if websocket.client_state != WebSocketState.DISCONNECTED:
+                    with suppress(Exception):
+                        await websocket.close()
+            return
+
+        ws_path = f"/agents/{agent.id}/vms/{quote(cleaned_vm_name, safe='')}/console"
+        await _proxy_api_websocket(websocket, path=ws_path, user=user)
 
     @app.post(
         "/management/agents/{agent_id}/allow-unknown-hosts",
@@ -1205,7 +1429,13 @@ def create_app(
         if agent is None:
             return _json_agent_missing()
 
-        runner = _build_ssh_runner(agent)
+        try:
+            runner = _build_ssh_runner(agent, user=user)
+        except RuntimeError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"status": "error", "message": str(exc)},
+            )
 
         try:
             nodeinfo_result = runner.run(build_virsh_command("nodeinfo"))

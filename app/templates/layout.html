@@ -126,7 +126,20 @@
             color: var(--text);
             font-size: 1rem;
         }
+        .field select {
+            padding: 0.85rem 1rem;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: rgba(15, 23, 42, 0.35);
+            color: var(--text);
+            font-size: 1rem;
+        }
         .field input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25);
+        }
+        .field select:focus {
             outline: none;
             border-color: var(--accent);
             box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25);
@@ -291,6 +304,12 @@
         tbody tr:hover {
             background: rgba(148, 163, 184, 0.08);
         }
+        tbody tr.selected {
+            background: rgba(56, 189, 248, 0.18);
+        }
+        tbody tr.selected:hover {
+            background: rgba(56, 189, 248, 0.22);
+        }
         .vm-actions {
             display: flex;
             gap: 0.5rem;
@@ -390,6 +409,50 @@
             display: grid;
             gap: 1.5rem;
             grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        }
+        .deployment-form {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        .deployment-grid {
+            display: grid;
+            gap: 1rem;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        }
+        .deployment-credentials {
+            display: grid;
+            gap: 1.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        dl.credential-list {
+            margin: 0;
+        }
+        dl.credential-list > div {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin-bottom: 0.35rem;
+        }
+        dl.credential-list dt {
+            color: var(--muted);
+            font-weight: 500;
+        }
+        dl.credential-list dd {
+            margin: 0;
+        }
+        .deployment-actions {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        kbd {
+            background: rgba(148, 163, 184, 0.2);
+            border-radius: 6px;
+            padding: 0.1rem 0.4rem;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            font-size: 0.75rem;
         }
         dl.stat-list {
             margin: 0;

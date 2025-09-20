@@ -113,6 +113,100 @@
 
     <div class="card">
         <div class="section-header">
+            <h2>Deploy a virtual machine</h2>
+            <span class="badge" id="deployment-selected-agent">{% if selected_agent %}{{ selected_agent.name }}{% else %}No agent selected{% endif %}</span>
+        </div>
+        <div id="deployment-placeholder" class="placeholder-box"{% if selected_agent %} style="display: none;"{% endif %}>
+            {% if not agents %}
+                Register a hypervisor to enable guided VM deployments.
+            {% elif not selected_agent %}
+                Select a hypervisor to prepare an automated operating system installation.
+            {% endif %}
+        </div>
+        <div id="deployment-section"{% if not selected_agent %} style="display: none;"{% endif %}>
+            <form id="deployment-form" class="deployment-form">
+                <div class="field">
+                    <label for="deployment-profile">Operating system</label>
+                    <select id="deployment-profile" name="profile_id"></select>
+                    <p class="help-text" id="deployment-description"></p>
+                    <p class="help-text">Source: <a id="deployment-source" href="#" target="_blank" rel="noopener">View documentation</a></p>
+                </div>
+                <div class="deployment-grid">
+                    <div class="field">
+                        <label for="deployment-name">VM name</label>
+                        <input type="text" id="deployment-name" name="vm_name" required placeholder="vm-example">
+                    </div>
+                    <div class="field">
+                        <label for="deployment-memory">Memory (MiB)</label>
+                        <input type="number" id="deployment-memory" name="memory_mb" min="512" step="256" required>
+                    </div>
+                    <div class="field">
+                        <label for="deployment-vcpus">vCPUs</label>
+                        <input type="number" id="deployment-vcpus" name="vcpus" min="1" step="1" required>
+                    </div>
+                    <div class="field">
+                        <label for="deployment-disk">Disk size (GiB)</label>
+                        <input type="number" id="deployment-disk" name="disk_gb" min="10" step="1" required>
+                    </div>
+                </div>
+                <div class="deployment-credentials">
+                    <div>
+                        <h3>Default credentials</h3>
+                        <dl class="credential-list">
+                            <div><dt>Username</dt><dd id="deployment-username">—</dd></div>
+                            <div><dt>Password</dt><dd id="deployment-password">—</dd></div>
+                        </dl>
+                        <p class="help-text" id="deployment-notes"></p>
+                    </div>
+                    <div>
+                        <h3>Download details</h3>
+                        <dl class="credential-list">
+                            <div><dt>Download</dt><dd><a id="deployment-download" href="#" target="_blank" rel="noopener">Open image</a></dd></div>
+                            <div><dt>OS variant</dt><dd id="deployment-variant">—</dd></div>
+                        </dl>
+                    </div>
+                </div>
+                <div class="deployment-actions">
+                    <button type="submit" class="button">Start deployment</button>
+                    <span id="deployment-status" class="ssh-status">Select an operating system to continue.</span>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
+            <h2>Virtual console</h2>
+            <span class="badge" id="vm-console-label">{% if selected_agent %}No VM selected{% else %}Unavailable{% endif %}</span>
+        </div>
+        <div id="vm-console-placeholder" class="placeholder-box">
+            {% if not agents %}
+                Register a hypervisor to access guest consoles.
+            {% elif not selected_agent %}
+                Select a hypervisor and choose a VM to open its console.
+            {% else %}
+                Select a virtual machine from the inventory to open its console.
+            {% endif %}
+        </div>
+        <div id="vm-console-section"{% if not selected_agent %} style="display: none;"{% endif %}>
+            <p class="muted">Interact with the selected guest through <code>virsh console</code>. Press <kbd>Ctrl</kbd> + <kbd>]</kbd> to release the session.</p>
+            <div class="ssh-terminal-wrapper">
+                <div id="vm-console-terminal" class="ssh-terminal"></div>
+                <div id="vm-console-overlay" class="ssh-terminal-overlay">Select a virtual machine to open its console.</div>
+            </div>
+            <div class="ssh-controls">
+                <div class="ssh-buttons">
+                    <button type="button" id="vm-console-connect" class="button secondary">Connect</button>
+                    <button type="button" id="vm-console-disconnect" class="button secondary" disabled>Disconnect</button>
+                </div>
+                <span id="vm-console-status" class="ssh-status">Disconnected.</span>
+            </div>
+            <p class="help-text">Console sessions stream directly from the hypervisor. Use the disconnect button or press <kbd>Ctrl</kbd> + <kbd>]</kbd> to exit.</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
             <h2>Host diagnostics</h2>
             <span class="badge" id="host-info-timestamp">{% if selected_agent %}Awaiting data{% else %}Idle{% endif %}</span>
         </div>
@@ -193,13 +287,15 @@
 <script id="agent-data" type="application/json">{{ agents | tojson }}</script>
 <script id="selected-agent" type="application/json">{{ selected_agent | tojson if selected_agent else 'null' }}</script>
 <script id="management-endpoints" type="application/json">{{ endpoints | tojson }}</script>
+<script id="deployment-profiles" type="application/json">{{ deployment_profiles | tojson }}</script>
 <script>
 (() => {
     const agentDataElement = document.getElementById('agent-data');
     const selectedAgentElement = document.getElementById('selected-agent');
     const endpointsElement = document.getElementById('management-endpoints');
+    const deploymentProfilesElement = document.getElementById('deployment-profiles');
 
-    if (!agentDataElement || !selectedAgentElement || !endpointsElement) {
+    if (!agentDataElement || !selectedAgentElement || !endpointsElement || !deploymentProfilesElement) {
         return;
     }
 
@@ -207,6 +303,9 @@
         agents: JSON.parse(agentDataElement.textContent || '[]'),
         selectedAgent: JSON.parse(selectedAgentElement.textContent || 'null'),
         endpoints: JSON.parse(endpointsElement.textContent || '{}'),
+        deploymentProfiles: JSON.parse(deploymentProfilesElement.textContent || '[]'),
+        vms: [],
+        selectedVm: null,
     };
 
     if (!state.endpoints || !state.endpoints.list_vms) {
@@ -242,6 +341,31 @@
     const hostMemoryAvailable = document.getElementById('host-memory-available');
     const hostInfoUpdated = document.getElementById('host-info-updated');
     const hostLoad = document.getElementById('host-load');
+    const deploymentPlaceholder = document.getElementById('deployment-placeholder');
+    const deploymentSection = document.getElementById('deployment-section');
+    const deploymentForm = document.getElementById('deployment-form');
+    const deploymentProfileSelect = document.getElementById('deployment-profile');
+    const deploymentDescription = document.getElementById('deployment-description');
+    const deploymentSourceLink = document.getElementById('deployment-source');
+    const deploymentDownloadLink = document.getElementById('deployment-download');
+    const deploymentUsername = document.getElementById('deployment-username');
+    const deploymentPassword = document.getElementById('deployment-password');
+    const deploymentVariant = document.getElementById('deployment-variant');
+    const deploymentNotes = document.getElementById('deployment-notes');
+    const deploymentStatus = document.getElementById('deployment-status');
+    const deploymentNameInput = document.getElementById('deployment-name');
+    const deploymentMemoryInput = document.getElementById('deployment-memory');
+    const deploymentVcpusInput = document.getElementById('deployment-vcpus');
+    const deploymentDiskInput = document.getElementById('deployment-disk');
+    const deploymentAgentBadge = document.getElementById('deployment-selected-agent');
+    const vmConsoleLabel = document.getElementById('vm-console-label');
+    const vmConsolePlaceholder = document.getElementById('vm-console-placeholder');
+    const vmConsoleSection = document.getElementById('vm-console-section');
+    const vmConsoleTerminalContainer = document.getElementById('vm-console-terminal');
+    const vmConsoleOverlay = document.getElementById('vm-console-overlay');
+    const vmConsoleConnectButton = document.getElementById('vm-console-connect');
+    const vmConsoleDisconnectButton = document.getElementById('vm-console-disconnect');
+    const vmConsoleStatus = document.getElementById('vm-console-status');
 
     let hostInfoTimer = null;
     let terminal = null;
@@ -249,6 +373,12 @@
     let terminalSocket = null;
     let terminalAgentId = null;
     let closingTerminalState = null;
+    let deploymentProfilesInitialised = false;
+    let currentDeploymentProfileId = null;
+    let vmConsoleTerminal = null;
+    let vmConsoleFitAddon = null;
+    let vmConsoleSocket = null;
+    let vmConsoleClosingState = null;
     const textEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
     const textDecoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
     const sshCopyButtonLabel = sshCopyButton ? sshCopyButton.textContent : '';
@@ -264,11 +394,14 @@
         return url;
     }
 
-    function buildWebsocketUrl(template, agentId) {
+    function buildWebsocketUrl(template, agentId, vmName) {
         if (!template) {
             return null;
         }
-        const replaced = template.replace('/0/', '/' + agentId + '/');
+        let replaced = template.replace('/0/', '/' + agentId + '/');
+        if (vmName !== undefined) {
+            replaced = replaced.replace('__VM__', encodeURIComponent(vmName));
+        }
         try {
             const url = new URL(replaced, window.location.href);
             url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -301,6 +434,161 @@
         } else {
             sshStatus.classList.remove('error');
         }
+    }
+
+    function setDeploymentStatus(message, isError = false) {
+        if (!deploymentStatus) {
+            return;
+        }
+        deploymentStatus.textContent = message;
+        deploymentStatus.classList.toggle('error', Boolean(isError));
+    }
+
+    function findDeploymentProfile(profileId) {
+        if (!Array.isArray(state.deploymentProfiles)) {
+            return null;
+        }
+        return state.deploymentProfiles.find((profile) => profile && profile.id === profileId) || null;
+    }
+
+    function populateDeploymentProfiles() {
+        if (!deploymentProfileSelect || deploymentProfilesInitialised) {
+            return;
+        }
+        const profiles = Array.isArray(state.deploymentProfiles) ? state.deploymentProfiles : [];
+        deploymentProfileSelect.innerHTML = '';
+        const fragment = document.createDocumentFragment();
+        profiles.forEach((profile) => {
+            if (!profile || !profile.id) {
+                return;
+            }
+            const option = document.createElement('option');
+            option.value = profile.id;
+            option.textContent = profile.name || profile.id;
+            fragment.appendChild(option);
+        });
+        deploymentProfileSelect.appendChild(fragment);
+        deploymentProfilesInitialised = true;
+        if (profiles.length && !currentDeploymentProfileId) {
+            currentDeploymentProfileId = profiles[0].id;
+        }
+    }
+
+    function updateDeploymentProfileDetails(profile, options = {}) {
+        const { resetValues = false } = options;
+
+        if (!profile) {
+            currentDeploymentProfileId = null;
+            if (deploymentDescription) {
+                deploymentDescription.textContent = 'No deployment profiles available.';
+            }
+            if (deploymentSourceLink) {
+                deploymentSourceLink.removeAttribute('href');
+                deploymentSourceLink.textContent = 'Not available';
+            }
+            if (deploymentDownloadLink) {
+                deploymentDownloadLink.removeAttribute('href');
+                deploymentDownloadLink.textContent = 'Unavailable';
+            }
+            if (deploymentUsername) {
+                deploymentUsername.textContent = '—';
+            }
+            if (deploymentPassword) {
+                deploymentPassword.textContent = '—';
+            }
+            if (deploymentVariant) {
+                deploymentVariant.textContent = '—';
+            }
+            if (deploymentNotes) {
+                deploymentNotes.textContent = '';
+            }
+            return;
+        }
+
+        currentDeploymentProfileId = profile.id;
+        if (deploymentProfileSelect && deploymentProfileSelect.value !== profile.id) {
+            deploymentProfileSelect.value = profile.id;
+        }
+        if (deploymentDescription) {
+            deploymentDescription.textContent = profile.description || '';
+        }
+        if (deploymentSourceLink) {
+            if (profile.source_url) {
+                deploymentSourceLink.href = profile.source_url;
+                deploymentSourceLink.textContent = 'View documentation';
+            } else {
+                deploymentSourceLink.removeAttribute('href');
+                deploymentSourceLink.textContent = 'Not available';
+            }
+        }
+        if (deploymentDownloadLink) {
+            if (profile.download_url) {
+                deploymentDownloadLink.href = profile.download_url;
+                deploymentDownloadLink.textContent = 'Open image';
+            } else {
+                deploymentDownloadLink.removeAttribute('href');
+                deploymentDownloadLink.textContent = 'Unavailable';
+            }
+        }
+        if (deploymentUsername) {
+            deploymentUsername.textContent = profile.default_username || '—';
+        }
+        if (deploymentPassword) {
+            deploymentPassword.textContent = profile.default_password || '—';
+        }
+        if (deploymentVariant) {
+            deploymentVariant.textContent = profile.os_variant || '—';
+        }
+        if (deploymentNotes) {
+            deploymentNotes.textContent = profile.notes || '';
+        }
+        if (resetValues) {
+            if (deploymentMemoryInput) {
+                deploymentMemoryInput.value = profile.default_memory_mb || '';
+            }
+            if (deploymentVcpusInput) {
+                deploymentVcpusInput.value = profile.default_vcpus || '';
+            }
+            if (deploymentDiskInput) {
+                deploymentDiskInput.value = profile.default_disk_gb || '';
+            }
+        }
+    }
+
+    function updateDeploymentSection(agent) {
+        if (!deploymentPlaceholder || !deploymentSection) {
+            return;
+        }
+
+        if (deploymentAgentBadge) {
+            deploymentAgentBadge.textContent = agent ? agent.name : 'No agent selected';
+        }
+
+        if (!Array.isArray(state.deploymentProfiles) || !state.deploymentProfiles.length) {
+            deploymentPlaceholder.style.display = '';
+            deploymentPlaceholder.textContent = 'No deployment profiles are available for this environment.';
+            deploymentSection.style.display = 'none';
+            setDeploymentStatus('No deployment profiles available.', true);
+            return;
+        }
+
+        populateDeploymentProfiles();
+
+        if (!agent) {
+            deploymentSection.style.display = 'none';
+            deploymentPlaceholder.style.display = '';
+            deploymentPlaceholder.textContent = state.agents.length
+                ? 'Select a hypervisor to prepare an automated operating system installation.'
+                : 'Register a hypervisor to enable guided VM deployments.';
+            setDeploymentStatus('Select a hypervisor to deploy.', false);
+            return;
+        }
+
+        deploymentPlaceholder.style.display = 'none';
+        deploymentSection.style.display = '';
+        const profile = findDeploymentProfile(currentDeploymentProfileId) || state.deploymentProfiles[0] || null;
+        updateDeploymentProfileDetails(profile, { resetValues: true });
+        setDeploymentStatus('Ready to deploy.', false);
     }
 
     function ensureTerminal() {
@@ -548,6 +836,341 @@
         });
     }
 
+    function ensureVmTerminal() {
+        if (vmConsoleTerminal || !vmConsoleTerminalContainer) {
+            return;
+        }
+        if (typeof window.Terminal !== 'function') {
+            showVmConsoleOverlay('Terminal library failed to load.');
+            setVmConsoleStatus('Browser console unavailable.', true);
+            return;
+        }
+        vmConsoleTerminal = new window.Terminal({
+            convertEol: true,
+            cursorBlink: true,
+            fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, Consolas, "Liberation Mono", Courier, monospace',
+            fontSize: 14,
+            theme: {
+                background: '#0f172a',
+                foreground: '#f8fafc',
+            },
+        });
+        if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+            vmConsoleFitAddon = new window.FitAddon.FitAddon();
+            vmConsoleTerminal.loadAddon(vmConsoleFitAddon);
+        }
+        vmConsoleTerminal.open(vmConsoleTerminalContainer);
+        if (vmConsoleFitAddon) {
+            vmConsoleFitAddon.fit();
+        }
+        vmConsoleTerminal.focus();
+        vmConsoleTerminal.onData((data) => {
+            if (vmConsoleSocket && vmConsoleSocket.readyState === WebSocket.OPEN) {
+                if (textEncoder) {
+                    vmConsoleSocket.send(textEncoder.encode(data));
+                } else {
+                    vmConsoleSocket.send(data);
+                }
+            }
+        });
+    }
+
+    function clearVmTerminal() {
+        if (vmConsoleTerminal) {
+            vmConsoleTerminal.reset();
+        }
+    }
+
+    function showVmConsoleOverlay(message) {
+        if (vmConsoleOverlay) {
+            vmConsoleOverlay.textContent = message;
+            vmConsoleOverlay.style.display = 'flex';
+        }
+    }
+
+    function hideVmConsoleOverlay() {
+        if (vmConsoleOverlay) {
+            vmConsoleOverlay.style.display = 'none';
+        }
+    }
+
+    function setVmConsoleStatus(message, isError = false) {
+        if (!vmConsoleStatus) {
+            return;
+        }
+        vmConsoleStatus.textContent = message;
+        if (isError) {
+            vmConsoleStatus.classList.add('error');
+        } else {
+            vmConsoleStatus.classList.remove('error');
+        }
+    }
+
+    function sendVmConsoleResize() {
+        if (!vmConsoleTerminal || !vmConsoleSocket || vmConsoleSocket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        const payload = {
+            type: 'resize',
+            cols: vmConsoleTerminal.cols,
+            rows: vmConsoleTerminal.rows,
+        };
+        try {
+            vmConsoleSocket.send(JSON.stringify(payload));
+        } catch (_) {
+            // ignore transmission errors
+        }
+    }
+
+    function disconnectVmConsole(showMessage = true) {
+        if (!vmConsoleSocket) {
+            if (showMessage) {
+                setVmConsoleStatus('Disconnected.');
+                showVmConsoleOverlay('Console disconnected.');
+            }
+            if (vmConsoleDisconnectButton) {
+                vmConsoleDisconnectButton.setAttribute('disabled', 'true');
+            }
+            if (vmConsoleConnectButton) {
+                if (state.selectedAgent && state.selectedVm) {
+                    vmConsoleConnectButton.removeAttribute('disabled');
+                } else {
+                    vmConsoleConnectButton.setAttribute('disabled', 'true');
+                }
+            }
+            vmConsoleClosingState = null;
+            return;
+        }
+        vmConsoleClosingState = showMessage ? 'manual' : 'silent';
+        const socket = vmConsoleSocket;
+        vmConsoleSocket = null;
+        try {
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'close' }));
+            }
+            socket.close();
+        } catch (_) {
+            // ignore close failures
+        }
+    }
+
+    function connectVmConsole() {
+        const agent = state.selectedAgent;
+        const vm = state.selectedVm;
+        if (!agent || !vm) {
+            return;
+        }
+
+        ensureVmTerminal();
+        if (!vmConsoleTerminal) {
+            setVmConsoleStatus('Browser console unavailable.', true);
+            showVmConsoleOverlay('Unable to initialize console component.');
+            return;
+        }
+
+        if (!state.endpoints || !state.endpoints.vm_console) {
+            setVmConsoleStatus('Console endpoint is not configured.', true);
+            showVmConsoleOverlay('Console endpoint is not available.');
+            return;
+        }
+
+        const websocketUrl = buildWebsocketUrl(state.endpoints.vm_console, agent.id, vm.name);
+        if (!websocketUrl) {
+            setVmConsoleStatus('Console endpoint is not configured.', true);
+            showVmConsoleOverlay('Console endpoint is not available.');
+            return;
+        }
+
+        if (vmConsoleSocket) {
+            if (
+                vmConsoleSocket.readyState === WebSocket.OPEN &&
+                vmConsoleClosingState === null &&
+                state.selectedVm &&
+                state.selectedVm.name === vm.name
+            ) {
+                return;
+            }
+            disconnectVmConsole(false);
+        }
+
+        vmConsoleClosingState = null;
+        setVmConsoleStatus(`Connecting to ${vm.name}…`);
+        showVmConsoleOverlay(`Connecting to ${vm.name}…`);
+        if (vmConsoleConnectButton) {
+            vmConsoleConnectButton.setAttribute('disabled', 'true');
+        }
+        if (vmConsoleDisconnectButton) {
+            vmConsoleDisconnectButton.removeAttribute('disabled');
+        }
+
+        clearVmTerminal();
+
+        try {
+            vmConsoleSocket = new WebSocket(websocketUrl);
+        } catch (_) {
+            vmConsoleSocket = null;
+            setVmConsoleStatus('Failed to connect.', true);
+            showVmConsoleOverlay('Failed to establish console session.');
+            if (vmConsoleConnectButton) {
+                vmConsoleConnectButton.removeAttribute('disabled');
+            }
+            if (vmConsoleDisconnectButton) {
+                vmConsoleDisconnectButton.setAttribute('disabled', 'true');
+            }
+            return;
+        }
+
+        vmConsoleSocket.binaryType = 'arraybuffer';
+
+        vmConsoleSocket.addEventListener('open', () => {
+            setVmConsoleStatus(`Connected to ${vm.name}`);
+            hideVmConsoleOverlay();
+            if (vmConsoleFitAddon) {
+                vmConsoleFitAddon.fit();
+            }
+            sendVmConsoleResize();
+        });
+
+        vmConsoleSocket.addEventListener('message', (event) => {
+            if (typeof event.data === 'string') {
+                try {
+                    const payload = JSON.parse(event.data);
+                    if (payload.type === 'status' && payload.status === 'connected') {
+                        hideVmConsoleOverlay();
+                        return;
+                    }
+                    if (payload.type === 'error') {
+                        setVmConsoleStatus(payload.message || 'Console session error.', true);
+                        showVmConsoleOverlay(payload.message || 'Console session error.');
+                    }
+                } catch (_) {
+                    // ignore non-JSON control messages
+                }
+                return;
+            }
+
+            if (event.data instanceof ArrayBuffer && vmConsoleTerminal) {
+                let text = '';
+                if (textDecoder) {
+                    text = textDecoder.decode(event.data);
+                } else {
+                    const view = new Uint8Array(event.data);
+                    text = Array.from(view).map((code) => String.fromCharCode(code)).join('');
+                }
+                vmConsoleTerminal.write(text);
+            }
+        });
+
+        vmConsoleSocket.addEventListener('close', () => {
+            const mode = vmConsoleClosingState;
+            vmConsoleClosingState = null;
+            vmConsoleSocket = null;
+            if (vmConsoleDisconnectButton) {
+                vmConsoleDisconnectButton.setAttribute('disabled', 'true');
+            }
+            if (vmConsoleConnectButton) {
+                if (state.selectedAgent && state.selectedVm) {
+                    vmConsoleConnectButton.removeAttribute('disabled');
+                } else {
+                    vmConsoleConnectButton.setAttribute('disabled', 'true');
+                }
+            }
+            if (mode !== 'silent') {
+                setVmConsoleStatus('Disconnected.');
+                showVmConsoleOverlay('Console disconnected.');
+            }
+        });
+
+        vmConsoleSocket.addEventListener('error', () => {
+            setVmConsoleStatus('Failed to connect.', true);
+            showVmConsoleOverlay('Failed to establish console session.');
+        });
+    }
+
+    function selectVm(vm) {
+        if (!vm) {
+            if (state.selectedVm) {
+                state.selectedVm = null;
+                updateVmConsoleSection();
+                renderVmTable();
+            }
+            return;
+        }
+        state.selectedVm = { ...vm };
+        renderVmTable();
+        updateVmConsoleSection();
+    }
+
+    function updateVmConsoleSection() {
+        if (!vmConsolePlaceholder || !vmConsoleSection) {
+            return;
+        }
+        const agent = state.selectedAgent;
+        const vm = state.selectedVm;
+
+        if (!agent) {
+            vmConsolePlaceholder.style.display = '';
+            vmConsolePlaceholder.textContent = state.agents.length
+                ? 'Select a hypervisor and choose a VM to open its console.'
+                : 'Register a hypervisor to access guest consoles.';
+            vmConsoleSection.style.display = 'none';
+            disconnectVmConsole(false);
+            if (vmConsoleLabel) {
+                vmConsoleLabel.textContent = 'Unavailable';
+            }
+            return;
+        }
+
+        vmConsoleSection.style.display = '';
+        if (vmConsoleLabel) {
+            vmConsoleLabel.textContent = vm ? vm.name : 'No VM selected';
+        }
+
+        if (!vm) {
+            vmConsolePlaceholder.style.display = '';
+            vmConsolePlaceholder.textContent = 'Select a virtual machine from the inventory to open its console.';
+            showVmConsoleOverlay('Select a virtual machine to connect.');
+            setVmConsoleStatus('Disconnected.');
+            if (vmConsoleConnectButton) {
+                vmConsoleConnectButton.setAttribute('disabled', 'true');
+            }
+            if (vmConsoleDisconnectButton) {
+                vmConsoleDisconnectButton.setAttribute('disabled', 'true');
+            }
+            return;
+        }
+
+        vmConsolePlaceholder.style.display = 'none';
+        const connected = vmConsoleSocket && vmConsoleSocket.readyState === WebSocket.OPEN;
+        if (connected) {
+            hideVmConsoleOverlay();
+            setVmConsoleStatus(`Connected to ${vm.name}`);
+            if (vmConsoleConnectButton) {
+                vmConsoleConnectButton.setAttribute('disabled', 'true');
+            }
+            if (vmConsoleDisconnectButton) {
+                vmConsoleDisconnectButton.removeAttribute('disabled');
+            }
+        } else {
+            showVmConsoleOverlay(`Click Connect to open ${vm.name}.`);
+            setVmConsoleStatus('Ready to connect.');
+            if (vmConsoleConnectButton) {
+                vmConsoleConnectButton.removeAttribute('disabled');
+            }
+            if (vmConsoleDisconnectButton) {
+                vmConsoleDisconnectButton.setAttribute('disabled', 'true');
+            }
+            clearVmTerminal();
+            ensureVmTerminal();
+            if (vmConsoleFitAddon) {
+                requestAnimationFrame(() => {
+                    vmConsoleFitAddon.fit();
+                    sendVmConsoleResize();
+                });
+            }
+        }
+    }
+
     if (sshConnectButton) {
         sshConnectButton.addEventListener('click', () => {
             if (state.selectedAgent) {
@@ -621,15 +1244,122 @@
         });
     }
 
+    if (vmConsoleConnectButton) {
+        vmConsoleConnectButton.addEventListener('click', () => {
+            connectVmConsole();
+        });
+    }
+
+    if (vmConsoleDisconnectButton) {
+        vmConsoleDisconnectButton.addEventListener('click', () => {
+            disconnectVmConsole();
+        });
+    }
+
+    if (deploymentProfileSelect) {
+        deploymentProfileSelect.addEventListener('change', () => {
+            const selectedId = deploymentProfileSelect.value;
+            const profile = findDeploymentProfile(selectedId);
+            if (profile) {
+                updateDeploymentProfileDetails(profile, { resetValues: true });
+                setDeploymentStatus('Ready to deploy.', false);
+            } else {
+                setDeploymentStatus('Select an operating system to deploy.', true);
+            }
+        });
+    }
+
+    if (deploymentForm) {
+        deploymentForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const agent = state.selectedAgent;
+            if (!agent) {
+                setDeploymentStatus('Select a hypervisor before deploying.', true);
+                return;
+            }
+            if (!state.endpoints || !state.endpoints.deploy_vm) {
+                setDeploymentStatus('Deployment endpoint is not configured.', true);
+                return;
+            }
+
+            const profileId = currentDeploymentProfileId || (deploymentProfileSelect ? deploymentProfileSelect.value : null);
+            const profile = findDeploymentProfile(profileId);
+            if (!profileId || !profile) {
+                setDeploymentStatus('Select an operating system to deploy.', true);
+                return;
+            }
+
+            const vmName = deploymentNameInput ? deploymentNameInput.value.trim() : '';
+            if (!vmName) {
+                setDeploymentStatus('Enter a name for the virtual machine.', true);
+                if (deploymentNameInput) {
+                    deploymentNameInput.focus();
+                }
+                return;
+            }
+
+            const payload = {
+                profile_id: profileId,
+                vm_name: vmName,
+                memory_mb: deploymentMemoryInput ? deploymentMemoryInput.value : undefined,
+                vcpus: deploymentVcpusInput ? deploymentVcpusInput.value : undefined,
+                disk_gb: deploymentDiskInput ? deploymentDiskInput.value : undefined,
+            };
+
+            setDeploymentStatus(`Starting deployment on ${agent.name}…`);
+            const submitButton = deploymentForm.querySelector('button[type="submit"]');
+            if (submitButton) {
+                submitButton.setAttribute('disabled', 'true');
+            }
+
+            try {
+                const url = buildUrl(state.endpoints.deploy_vm, agent.id);
+                const response = await fetch(url, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const result = await response.json();
+                if (!response.ok || result.status !== 'ok') {
+                    const message = (result && result.message) || 'Deployment failed.';
+                    throw new Error(message);
+                }
+                setDeploymentStatus(result.message || `Deployment for '${vmName}' started.`, false);
+                if (result.profile) {
+                    if (deploymentUsername && result.profile.default_username) {
+                        deploymentUsername.textContent = result.profile.default_username;
+                    }
+                    if (deploymentPassword && result.profile.default_password) {
+                        deploymentPassword.textContent = result.profile.default_password;
+                    }
+                }
+                await fetchVms(agent);
+            } catch (error) {
+                const message = (error && error.message) || 'Deployment failed.';
+                setDeploymentStatus(message, true);
+            } finally {
+                if (submitButton) {
+                    submitButton.removeAttribute('disabled');
+                }
+            }
+        });
+    }
+
     window.addEventListener('resize', () => {
         if (fitAddon) {
             fitAddon.fit();
             sendTerminalResize();
         }
+        if (vmConsoleFitAddon) {
+            vmConsoleFitAddon.fit();
+            sendVmConsoleResize();
+        }
     });
 
     window.addEventListener('beforeunload', () => {
         disconnectTerminal(false);
+        disconnectVmConsole(false);
     });
 
     function clearHostInfoTimer() {
@@ -1168,19 +1898,43 @@
         vmStatus.classList.toggle('danger', isError);
     }
 
-    function renderVmTable(vms) {
+    function renderVmTable() {
         if (!vmTableBody || !vmTableWrapper) {
             return;
         }
+
+        const vms = Array.isArray(state.vms) ? state.vms : [];
         vmTableBody.innerHTML = '';
+
         if (!vms.length) {
-            setVmStatus('No virtual machines reported by the selected hypervisor.');
             vmTableWrapper.style.display = 'none';
+            setVmStatus('No virtual machines reported by the selected hypervisor.');
+            state.selectedVm = null;
+            updateVmConsoleSection();
             return;
         }
+
         vmTableWrapper.style.display = '';
+        const selectedVmName = state.selectedVm ? state.selectedVm.name : null;
+        let selectedVmStillPresent = false;
+
         vms.forEach((vm) => {
             const row = document.createElement('tr');
+            row.className = 'vm-row';
+            row.dataset.vmName = vm.name;
+
+            row.addEventListener('click', (event) => {
+                if (event.target && event.target.closest('button')) {
+                    return;
+                }
+                selectVm(vm);
+            });
+
+            if (selectedVmName && vm.name === selectedVmName) {
+                row.classList.add('selected');
+                selectedVmStillPresent = true;
+            }
+
             const nameCell = document.createElement('td');
             nameCell.textContent = vm.name;
             row.appendChild(nameCell);
@@ -1211,7 +1965,10 @@
                 button.type = 'button';
                 button.className = 'button small' + (variant ? ' ' + variant : '');
                 button.textContent = label;
-                button.addEventListener('click', () => triggerVmAction(vm.name, action));
+                button.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    triggerVmAction(vm.name, action);
+                });
                 return button;
             };
 
@@ -1219,20 +1976,34 @@
             actionsCell.appendChild(makeActionButton('Shutdown', 'shutdown'));
             actionsCell.appendChild(makeActionButton('Force stop', 'force-stop', 'danger'));
             actionsCell.appendChild(makeActionButton('Reboot', 'reboot'));
-            row.appendChild(actionsCell);
 
+            const consoleButton = document.createElement('button');
+            consoleButton.type = 'button';
+            consoleButton.className = 'button small secondary';
+            consoleButton.textContent = 'Console';
+            consoleButton.addEventListener('click', (event) => {
+                event.stopPropagation();
+                selectVm(vm);
+                connectVmConsole();
+            });
+            actionsCell.appendChild(consoleButton);
+
+            row.appendChild(actionsCell);
             vmTableBody.appendChild(row);
         });
+
+        if (selectedVmName && !selectedVmStillPresent) {
+            state.selectedVm = null;
+            updateVmConsoleSection();
+        }
     }
 
     async function fetchVms(agent) {
         if (!agent) {
-            if (vmTableBody) {
-                vmTableBody.innerHTML = '';
-            }
-            if (vmTableWrapper) {
-                vmTableWrapper.style.display = 'none';
-            }
+            state.vms = [];
+            state.selectedVm = null;
+            renderVmTable();
+            updateVmConsoleSection();
             setVmStatus('Select a hypervisor to load its virtual machines.');
             return;
         }
@@ -1244,14 +2015,17 @@
             if (payload.status !== 'ok') {
                 throw new Error(payload.message || 'Unable to list virtual machines.');
             }
-            renderVmTable(payload.vms || []);
-            if ((payload.vms || []).length) {
-                setVmStatus(`${payload.vms.length} virtual machine(s) reported by ${agent.name}.`);
+            state.vms = Array.isArray(payload.vms) ? payload.vms : [];
+            renderVmTable();
+            updateVmConsoleSection();
+            if (state.vms.length) {
+                setVmStatus(`${state.vms.length} virtual machine(s) reported by ${agent.name}.`);
             }
         } catch (error) {
-            if (vmTableWrapper) {
-                vmTableWrapper.style.display = 'none';
-            }
+            state.vms = [];
+            state.selectedVm = null;
+            renderVmTable();
+            updateVmConsoleSection();
             setVmStatus(error.message || 'Failed to query virtual machines.', true);
         }
     }
@@ -1281,9 +2055,15 @@
 
     function selectAgent(agent) {
         state.selectedAgent = agent;
+        state.selectedVm = null;
+        state.vms = [];
+        disconnectVmConsole(false);
         renderAgents();
         updateAgentLabel(agent);
         updateSshSection(agent);
+        updateDeploymentSection(agent);
+        renderVmTable();
+        updateVmConsoleSection();
         fetchVms(agent);
         fetchHostInfo(agent);
     }
@@ -1291,6 +2071,9 @@
     renderAgents();
     updateAgentLabel(state.selectedAgent);
     updateSshSection(state.selectedAgent);
+    updateDeploymentSection(state.selectedAgent);
+    renderVmTable();
+    updateVmConsoleSection();
     if (state.selectedAgent) {
         fetchVms(state.selectedAgent);
         fetchHostInfo(state.selectedAgent);

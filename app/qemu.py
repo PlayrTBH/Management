@@ -204,8 +204,8 @@ ssh_pwauth: true
 EOF
 
 cat <<'EOF' > "$META_DATA"
-instance-id: $VM_NAME
-local-hostname: $VM_NAME
+instance-id: {vm_name}
+local-hostname: {vm_name}
 EOF
 
 virt-install \

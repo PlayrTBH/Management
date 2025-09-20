@@ -46,6 +46,7 @@ def test_deploy_vm_ubuntu_generates_cloud_init_script():
     assert "cloud-config" in script
     assert "playradmin:PlayrServers!23" in script
     assert "ubuntu24.04" in script
+    assert "instance-id: vm-test" in script
     assert timeout == 900
     assert result.exit_status == 0
 

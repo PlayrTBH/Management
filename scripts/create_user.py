@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-"""Provision a management user without enabling self-registration."""
-from __future__ import annotations
-
 import argparse
 import getpass
 import os
@@ -53,14 +49,13 @@ def main() -> int:
     database.initialize()
 
     try:
-        user, api_key = database.create_user(args.name.strip(), args.email.strip().lower(), password)
+        user = database.create_user(args.name.strip(), args.email.strip().lower(), password)
     except ValueError as exc:  # duplicates, etc.
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     print(f"Created user #{user.id}: {user.name} <{user.email}>")
-    print("API key (store securely, it will not be shown again):")
-    print(api_key)
+    print("API keys and hypervisor management have been removed; this account stores only login details.")
     return 0
 
 

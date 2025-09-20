@@ -14,6 +14,8 @@ clean foundation.
 - ✅ **Agent coordination service** – `app.service.create_app()` exposes a
   FastAPI application that agents use to authenticate, maintain heartbeats, and
   request encrypted tunnels that terminate on `manage.playrservers.com:443`.
+- ✅ **Secure web dashboard** – administrators can sign in at
+  `https://<host>/` to review their account and view paired hypervisors.
 - ✅ **Command-line bootstrap** – `python main.py` initialises the database by
   default, while `python main.py serve` launches the HTTP control plane.
 
@@ -84,11 +86,22 @@ python scripts/create_user.py "Test User" test@example.com
 
 ### Running the management API
 
-Launch the API using the same credentials you created above:
+Launch the API using the same credentials you created above. Provide the path to
+your TLS certificate and private key so the management portal is available over
+HTTPS on port 443:
 
 ```bash
-python main.py serve --host 0.0.0.0 --port 8000
+python main.py serve \
+  --host 0.0.0.0 \
+  --port 443 \
+  --ssl-certfile /etc/ssl/certs/management.crt \
+  --ssl-keyfile /etc/ssl/private/management.key
 ```
+
+With the service running you can sign in at `https://localhost/` (or the
+appropriate hostname) to access the new management dashboard. Sessions are
+kept in-memory on the server, so restarting the process will invalidate any
+active browser logins.
 
 Agents authenticate with HTTP Basic credentials (email + password) and interact
 with the following key endpoints:

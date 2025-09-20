@@ -194,6 +194,42 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertEqual(agent_info["agent_id"], "agent-list")
             self.assertEqual(agent_info["hostname"], "hypervisor-list")
 
+    def test_web_login_and_dashboard_flow(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            landing = client.get("/")
+            self.assertEqual(landing.status_code, 200)
+            self.assertIn("Welcome back", landing.text)
+
+            bad_login = client.post(
+                "/login",
+                data={"email": self.user_email, "password": "incorrect"},
+            )
+            self.assertEqual(bad_login.status_code, 400)
+            self.assertIn("Invalid email or password", bad_login.text)
+
+            response = client.post(
+                "/login",
+                data={"email": self.user_email, "password": self.user_password},
+                follow_redirects=False,
+            )
+            self.assertEqual(response.status_code, 303)
+            self.assertTrue(response.headers["location"].endswith("/dashboard"))
+
+            dashboard = client.get("/dashboard")
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn("Account overview", dashboard.text)
+
+            logout = client.get("/logout", follow_redirects=False)
+            self.assertEqual(logout.status_code, 303)
+            self.assertTrue(logout.headers["location"].endswith("/login"))
+
+            redirected = client.get("/dashboard", follow_redirects=False)
+            self.assertEqual(redirected.status_code, 303)
+            self.assertTrue(redirected.headers["location"].endswith("/login"))
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

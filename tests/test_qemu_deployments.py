@@ -1,3 +1,4 @@
+import shlex
 import sys
 from pathlib import Path
 
@@ -155,6 +156,25 @@ def test_deploy_vm_uses_custom_image_root(monkeypatch, tmp_path):
     )
 
     script, _ = extract_script(runner)
-    assert str(custom_root) in script
-    assert str(custom_root / "seed" / "vm-custom-root") in script
+    expected_assignment = f"DEFAULT_IMAGE_ROOT={shlex.quote(str(custom_root))}"
+    assert expected_assignment in script
+    assert 'IMAGES_DIR="$DEFAULT_IMAGE_ROOT"' in script
+    assert 'SEED_DIR="$IMAGES_DIR/seed/${VM_NAME}"' in script
+
+
+def test_deploy_vm_script_mentions_remote_override():
+    runner = DummyRunner()
+    manager = QEMUManager(runner)
+
+    manager.deploy_vm(
+        "ubuntu-24-04",
+        "vm-remote-override",
+        memory_mb=2048,
+        vcpus=2,
+        disk_gb=32,
+    )
+
+    script, _ = extract_script(runner)
+    assert "MANAGEMENT_QEMU_IMAGE_ROOT" in script
+    assert 'CANDIDATE="$(printf' in script
 

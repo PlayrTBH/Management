@@ -114,6 +114,34 @@ def _resolve_image_root() -> str:
     return str(path)
 
 
+def _image_root_shell_preamble() -> str:
+    """Return shell code that resolves the image root on the remote host."""
+
+    default_root = _resolve_image_root()
+    snippet = f"""
+DEFAULT_IMAGE_ROOT={shlex.quote(default_root)}
+IMAGES_DIR="$DEFAULT_IMAGE_ROOT"
+
+if [ -n "${{MANAGEMENT_QEMU_IMAGE_ROOT+x}}" ]; then
+    CANDIDATE="$(printf '%s' "${{MANAGEMENT_QEMU_IMAGE_ROOT}}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -z "$CANDIDATE" ]; then
+        echo "{_IMAGE_ROOT_ENV_VAR} must not be empty when set." >&2
+        exit 60
+    fi
+    case "$CANDIDATE" in
+        /*)
+            IMAGES_DIR="$CANDIDATE"
+            ;;
+        *)
+            echo "{_IMAGE_ROOT_ENV_VAR} must be set to an absolute path when set." >&2
+            exit 61
+            ;;
+    esac
+fi
+"""
+    return textwrap.dedent(snippet).strip()
+
+
 _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 
 
@@ -172,23 +200,17 @@ def _render_ubuntu_deployment_script(
     username: str,
     password: str,
 ) -> str:
-    image_root = _resolve_image_root()
-    image_root_path = Path(image_root)
-    image_path = image_root_path / "cloud" / "noble-server-cloudimg-amd64.img"
-    disk_path = image_root_path / f"{vm_name}.qcow2"
-    seed_dir = image_root_path / "seed" / vm_name
-    user_data = seed_dir / "user-data"
-    meta_data = seed_dir / "meta-data"
+    image_root_preamble = _image_root_shell_preamble()
     script = f"""
 set -euo pipefail
 
 VM_NAME={shlex.quote(vm_name)}
-IMAGES_DIR={shlex.quote(image_root)}
-BASE_IMAGE={shlex.quote(str(image_path))}
-DISK_IMAGE={shlex.quote(str(disk_path))}
-SEED_DIR={shlex.quote(str(seed_dir))}
-USER_DATA={shlex.quote(str(user_data))}
-META_DATA={shlex.quote(str(meta_data))}
+{image_root_preamble}
+BASE_IMAGE="$IMAGES_DIR/cloud/noble-server-cloudimg-amd64.img"
+DISK_IMAGE="$IMAGES_DIR/${{VM_NAME}}.qcow2"
+SEED_DIR="$IMAGES_DIR/seed/${{VM_NAME}}"
+USER_DATA="$SEED_DIR/user-data"
+META_DATA="$SEED_DIR/meta-data"
 DOWNLOAD_URL={shlex.quote('https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img')}
 
 mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$IMAGES_DIR/iso" "$IMAGES_DIR/unattend"
@@ -256,25 +278,19 @@ def _render_windows_deployment_script(
     username: str,
     password: str,
 ) -> str:
-    image_root = _resolve_image_root()
-    image_root_path = Path(image_root)
-    iso_path = image_root_path / "iso" / "windows-server-2022.iso"
-    disk_path = image_root_path / f"{vm_name}.qcow2"
-    unattend_dir = image_root_path / "unattend" / vm_name
-    unattend_xml = unattend_dir / "Autounattend.xml"
-    unattend_iso = unattend_dir / "autounattend.iso"
+    image_root_preamble = _image_root_shell_preamble()
     download_url = "https://software-download.microsoft.com/download/pr/20348.169.210806-2348.fe_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso"
     script = f"""
 set -euo pipefail
 
 VM_NAME={shlex.quote(vm_name)}
-IMAGES_DIR={shlex.quote(image_root)}
-ISO_STORE={shlex.quote(str(image_root_path / 'iso'))}
-ISO_PATH={shlex.quote(str(iso_path))}
-DISK_IMAGE={shlex.quote(str(disk_path))}
-UNATTEND_DIR={shlex.quote(str(unattend_dir))}
-UNATTEND_XML={shlex.quote(str(unattend_xml))}
-UNATTEND_ISO={shlex.quote(str(unattend_iso))}
+{image_root_preamble}
+ISO_STORE="$IMAGES_DIR/iso"
+ISO_PATH="$ISO_STORE/windows-server-2022.iso"
+DISK_IMAGE="$IMAGES_DIR/${{VM_NAME}}.qcow2"
+UNATTEND_DIR="$IMAGES_DIR/unattend/${{VM_NAME}}"
+UNATTEND_XML="$UNATTEND_DIR/Autounattend.xml"
+UNATTEND_ISO="$UNATTEND_DIR/autounattend.iso"
 DOWNLOAD_URL={shlex.quote(download_url)}
 
 mkdir -p "$IMAGES_DIR" "$IMAGES_DIR/cloud" "$IMAGES_DIR/seed" "$ISO_STORE" "$IMAGES_DIR/unattend" "$UNATTEND_DIR"

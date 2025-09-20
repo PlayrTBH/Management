@@ -1,6 +1,8 @@
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -27,12 +29,17 @@ class StubManager:
         self.calls = []
         self._result = result or CommandResult(command=["bash", "-lc", ""], exit_status=0, stdout="", stderr="")
         self._error = error
+        self._event = threading.Event()
 
     def deploy_vm(self, profile_id, vm_name, **kwargs):
         self.calls.append((profile_id, vm_name, kwargs))
+        self._event.set()
         if self._error:
             raise self._error
         return self._result
+
+    def wait_for_call(self, timeout=1.0):
+        return self._event.wait(timeout)
 
 
 @pytest.fixture
@@ -69,6 +76,35 @@ def authenticate(client: TestClient):
     assert response.status_code == 303
 
 
+def get_deployment_detail(client: TestClient, deployment_id: str):
+    response = client.get(f"/management/deployments/{deployment_id}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    return payload["deployment"]
+
+
+def wait_for_deployment_status(
+    client: TestClient,
+    deployment_id: str,
+    expected_status: str,
+    timeout: float = 2.0,
+):
+    deadline = time.time() + timeout
+    expected = expected_status.lower()
+    last_detail = None
+    while time.time() < deadline:
+        detail = get_deployment_detail(client, deployment_id)
+        last_detail = detail
+        if (detail.get("status") or "").lower() == expected:
+            return detail
+        time.sleep(0.05)
+    last_status = last_detail.get("status") if last_detail else "unknown"
+    raise AssertionError(
+        f"Deployment {deployment_id} did not reach status {expected_status!r}; last status was {last_status!r}."
+    )
+
+
 def test_deploy_endpoint_requires_authentication(app):
     manager = StubManager()
     app.state.qemu_manager_factory = lambda agent: manager
@@ -100,12 +136,13 @@ def test_deploy_endpoint_invokes_manager(app):
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         payload = response.json()
         assert payload["status"] == "ok"
         assert "credentials" in payload
         assert payload["credentials"]["username"] == "playradmin"
         assert payload["credentials"]["password"] == "PlayrServers!23"
+        assert manager.wait_for_call(timeout=1.0)
         assert manager.calls
         profile_id, vm_name, kwargs = manager.calls[0]
         assert profile_id == "ubuntu-24-04"
@@ -113,6 +150,12 @@ def test_deploy_endpoint_invokes_manager(app):
         assert kwargs["memory_mb"] == 4096
         assert kwargs["username"] == "playradmin"
         assert kwargs["password"] == "PlayrServers!23"
+
+        deployment_id = payload.get("deployment_id")
+        assert deployment_id
+        detail = wait_for_deployment_status(client, deployment_id, "succeeded")
+        assert detail["exit_status"] == 0
+        assert detail["command"] == result.command
 
 
 def test_deploy_endpoint_accepts_custom_credentials(app):
@@ -131,17 +174,23 @@ def test_deploy_endpoint_accepts_custom_credentials(app):
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         payload = response.json()
         assert payload["status"] == "ok"
         assert payload["credentials"]["username"] == "customadmin"
         assert payload["credentials"]["password"] == "SuperSecurePass1!"
+        assert manager.wait_for_call(timeout=1.0)
         assert manager.calls
         profile_id, vm_name, kwargs = manager.calls[0]
         assert profile_id == "ubuntu-24-04"
         assert vm_name == "vm-delta"
         assert kwargs["username"] == "customadmin"
         assert kwargs["password"] == "SuperSecurePass1!"
+
+        deployment_id = payload.get("deployment_id")
+        assert deployment_id
+        detail = wait_for_deployment_status(client, deployment_id, "succeeded")
+        assert detail["status"].lower() == 'succeeded'
 
 
 def test_deploy_endpoint_rejects_invalid_password(app):
@@ -176,9 +225,20 @@ def test_deploy_endpoint_reports_host_key_error(app):
             "/management/agents/1/deployments",
             json={"profile_id": "ubuntu-24-04", "vm_name": "vm-beta"},
         )
-        assert response.status_code == 502
+        assert response.status_code == 202
         payload = response.json()
-        assert payload["code"] == "host_key_verification_failed"
+        assert payload["status"] == "ok"
+        assert manager.wait_for_call(timeout=1.0)
+
+        deployment_id = payload.get("deployment_id")
+        assert deployment_id
+        detail = wait_for_deployment_status(client, deployment_id, "failed")
+        assert 'host key verification failed' in (detail.get("error") or '').lower()
+        messages = detail.get("messages") or []
+        assert any(
+            (entry.get("stream") == "error" and 'host key verification failed' in (entry.get("message") or '').lower())
+            for entry in messages
+        )
 
 
 def test_deploy_endpoint_reports_qemu_error(app):
@@ -192,10 +252,19 @@ def test_deploy_endpoint_reports_qemu_error(app):
             "/management/agents/1/deployments",
             json={"profile_id": "ubuntu-24-04", "vm_name": "vm-gamma"},
         )
-        assert response.status_code == 502
+        assert response.status_code == 202
         payload = response.json()
-        assert payload["status"] == "error"
-        assert "result" in payload
+        assert payload["status"] == "ok"
+        assert manager.wait_for_call(timeout=1.0)
+
+        deployment_id = payload.get("deployment_id")
+        assert deployment_id
+        detail = wait_for_deployment_status(client, deployment_id, "failed")
+        assert detail.get("error") == "boom"
+        assert detail.get("exit_status") == error_result.exit_status
+        assert detail.get("command") == error_result.command
+        messages = detail.get("messages") or []
+        assert any((entry.get("stream") == "error") for entry in messages)
 
 
 def test_deploy_endpoint_logs_qemu_error_details(app, caplog):
@@ -216,11 +285,23 @@ def test_deploy_endpoint_logs_qemu_error_details(app, caplog):
             json={"profile_id": "ubuntu-24-04", "vm_name": "vm-theta"},
         )
 
-    assert response.status_code == 502
-    assert any(
-        "VM deployment failed for 'vm-theta'" in record.message
-        and "profile 'ubuntu-24-04'" in record.message
-        and "exit_status=2" in record.message
-        and "stderr='deployment failure'" in record.message
-        for record in caplog.records
-    )
+        assert response.status_code == 202
+        payload = response.json()
+        assert manager.wait_for_call(timeout=1.0)
+
+        deployment_id = payload.get("deployment_id")
+        assert deployment_id
+        wait_for_deployment_status(client, deployment_id, "failed")
+
+        for _ in range(50):
+            if any(
+                "VM deployment failed for 'vm-theta'" in record.message
+                and "profile 'ubuntu-24-04'" in record.message
+                and "exit_status=2" in record.message
+                and "stderr='deployment failure'" in record.message
+                for record in caplog.records
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("Expected deployment failure log message was not emitted")

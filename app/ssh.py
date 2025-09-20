@@ -5,9 +5,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Generator, Optional, Sequence
+from typing import Callable, Generator, Optional, Sequence
 
 import shlex
+import time
 
 import paramiko
 
@@ -195,6 +196,96 @@ class SSHCommandRunner:
             stderr_text = stderr.read().decode("utf-8", errors="replace")
             exit_status = stdout.channel.recv_exit_status()
 
+        return CommandResult(command=args, exit_status=exit_status, stdout=stdout_text, stderr=stderr_text)
+
+    def run_streaming(
+        self,
+        args: Sequence[str],
+        *,
+        timeout: int = 60,
+        on_stdout: Callable[[str], None] | None = None,
+        on_stderr: Callable[[str], None] | None = None,
+    ) -> CommandResult:
+        """Execute a command while streaming output through callbacks."""
+
+        command = " ".join(shlex.quote(arg) for arg in args)
+        with self._factory.connect() as client:
+            transport = client.get_transport()
+            if transport is None:
+                raise SSHError("SSH transport is unavailable for streaming command execution")
+
+            try:
+                channel = transport.open_session()
+            except paramiko.SSHException as exc:
+                raise SSHError(f"Failed to execute remote command '{command}': {exc}") from exc
+
+            channel.settimeout(timeout)
+
+            try:
+                channel.exec_command(command)
+            except paramiko.SSHException as exc:
+                channel.close()
+                raise SSHError(f"Failed to execute remote command '{command}': {exc}") from exc
+
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+            start = time.monotonic()
+
+            try:
+                while True:
+                    if timeout and time.monotonic() - start > timeout:
+                        raise SSHError(
+                            f"Remote command '{command}' timed out after {timeout} seconds"
+                        )
+
+                    has_data = False
+
+                    if channel.recv_ready():
+                        try:
+                            data = channel.recv(4096)
+                        except paramiko.SSHException as exc:
+                            raise SSHError(
+                                f"Failed to read stdout from remote command '{command}': {exc}"
+                            ) from exc
+                        if data:
+                            text = data.decode("utf-8", errors="replace")
+                            stdout_chunks.append(text)
+                            if on_stdout is not None:
+                                try:
+                                    on_stdout(text)
+                                except Exception:
+                                    pass
+                            has_data = True
+
+                    if channel.recv_stderr_ready():
+                        try:
+                            data = channel.recv_stderr(4096)
+                        except paramiko.SSHException as exc:
+                            raise SSHError(
+                                f"Failed to read stderr from remote command '{command}': {exc}"
+                            ) from exc
+                        if data:
+                            text = data.decode("utf-8", errors="replace")
+                            stderr_chunks.append(text)
+                            if on_stderr is not None:
+                                try:
+                                    on_stderr(text)
+                                except Exception:
+                                    pass
+                            has_data = True
+
+                    if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                        break
+
+                    if not has_data:
+                        time.sleep(0.1)
+
+                exit_status = channel.recv_exit_status()
+            finally:
+                channel.close()
+
+        stdout_text = "".join(stdout_chunks)
+        stderr_text = "".join(stderr_chunks)
         return CommandResult(command=args, exit_status=exit_status, stdout=stdout_text, stderr=stderr_text)
 
 

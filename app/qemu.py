@@ -8,7 +8,7 @@ import shlex
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .ssh import CommandResult, SSHCommandRunner, SSHError
 
@@ -602,6 +602,8 @@ class QEMUManager:
         disk_gb: int | None = None,
         username: str | None = None,
         password: str | None = None,
+        stream_stdout: Optional[Callable[[str], None]] = None,
+        stream_stderr: Optional[Callable[[str], None]] = None,
     ) -> CommandResult:
         profile = get_vm_deployment_profile(profile_id)
         if profile is None:
@@ -633,8 +635,18 @@ class QEMUManager:
             resolved_password,
         )
 
+        run_kwargs = {"timeout": profile.timeout_seconds}
+
         try:
-            result = self._runner.run(["bash", "-lc", script], timeout=profile.timeout_seconds)
+            if stream_stdout is not None or stream_stderr is not None:
+                result = self._runner.run_streaming(
+                    ["bash", "-lc", script],
+                    timeout=profile.timeout_seconds,
+                    on_stdout=stream_stdout,
+                    on_stderr=stream_stderr,
+                )
+            else:
+                result = self._runner.run(["bash", "-lc", script], **run_kwargs)
         except SSHError as exc:
             raise QEMUError(f"Failed to deploy virtual machine '{cleaned_name}': {exc}") from exc
         if result.exit_status != 0:
@@ -643,6 +655,12 @@ class QEMUManager:
                 result,
             )
         return result
+
+    def destroy_vm(self, name: str) -> CommandResult:
+        return self._execute(
+            ["undefine", name, "--remove-all-storage", "--nvram"],
+            f"destroy virtual machine '{name}' and remove associated storage",
+        )
 
     def _execute(self, args: Sequence[str], action: str) -> CommandResult:
         command = build_virsh_command(*args)

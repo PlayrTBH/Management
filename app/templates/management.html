@@ -181,6 +181,18 @@
 
     <div class="card">
         <div class="section-header">
+            <h2>Deployment activity</h2>
+            <button type="button" id="deployment-refresh" class="button small secondary">Refresh</button>
+        </div>
+        <div id="deployment-activity-error" class="notice danger" style="display: none;"></div>
+        <div id="deployment-activity-empty" class="placeholder-box">
+            No deployments have been started yet. Launch a virtual machine to track its progress here.
+        </div>
+        <div id="deployment-activity" class="deployment-activity-list" style="display: none;"></div>
+    </div>
+
+    <div class="card">
+        <div class="section-header">
             <h2>Virtual console</h2>
             <span class="badge" id="vm-console-label">{% if selected_agent %}No VM selected{% else %}Unavailable{% endif %}</span>
         </div>
@@ -311,6 +323,8 @@
         deploymentProfiles: JSON.parse(deploymentProfilesElement.textContent || '[]'),
         vms: [],
         selectedVm: null,
+        deployments: [],
+        deploymentDetails: {},
     };
 
     if (!state.endpoints || !state.endpoints.list_vms) {
@@ -346,6 +360,10 @@
     const hostMemoryAvailable = document.getElementById('host-memory-available');
     const hostInfoUpdated = document.getElementById('host-info-updated');
     const hostLoad = document.getElementById('host-load');
+    const deploymentActivityContainer = document.getElementById('deployment-activity');
+    const deploymentActivityEmpty = document.getElementById('deployment-activity-empty');
+    const deploymentActivityError = document.getElementById('deployment-activity-error');
+    const deploymentRefreshButton = document.getElementById('deployment-refresh');
     const deploymentPlaceholder = document.getElementById('deployment-placeholder');
     const deploymentSection = document.getElementById('deployment-section');
     const deploymentForm = document.getElementById('deployment-form');
@@ -386,6 +404,9 @@
     let vmConsoleFitAddon = null;
     let vmConsoleSocket = null;
     let vmConsoleClosingState = null;
+    let deploymentSummaryTimer = null;
+    let deploymentSummaryInFlight = false;
+    const deploymentPollTimers = {};
     const textEncoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
     const textDecoder = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
     const sshCopyButtonLabel = sshCopyButton ? sshCopyButton.textContent : '';
@@ -413,6 +434,17 @@
             const url = new URL(replaced, window.location.href);
             url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
             return url.toString();
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function buildDeploymentDetailUrl(template, deploymentId) {
+        if (!template) {
+            return null;
+        }
+        try {
+            return template.replace('__DEPLOYMENT__', encodeURIComponent(deploymentId));
         } catch (_) {
             return null;
         }
@@ -449,6 +481,414 @@
         }
         deploymentStatus.textContent = message;
         deploymentStatus.classList.toggle('error', Boolean(isError));
+    }
+
+    function formatTimestamp(value) {
+        if (!value) {
+            return '—';
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return value;
+        }
+        return date.toLocaleString();
+    }
+
+    function formatLogTime(value) {
+        if (!value) {
+            return '—';
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return value;
+        }
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function formatDeploymentStatus(status) {
+        const normalized = (status || '').toLowerCase();
+        if (normalized === 'pending') {
+            return 'Pending';
+        }
+        if (normalized === 'running') {
+            return 'Running';
+        }
+        if (normalized === 'succeeded') {
+            return 'Completed';
+        }
+        if (normalized === 'failed') {
+            return 'Failed';
+        }
+        return status || 'Unknown';
+    }
+
+    function statusToBadgeClass(status) {
+        const normalized = (status || '').toLowerCase();
+        if (normalized === 'pending') {
+            return 'warning';
+        }
+        if (normalized === 'running') {
+            return 'info';
+        }
+        if (normalized === 'succeeded') {
+            return 'success';
+        }
+        if (normalized === 'failed') {
+            return 'danger';
+        }
+        return '';
+    }
+
+    function createMetaItem(label, value) {
+        const span = document.createElement('span');
+        const strong = document.createElement('strong');
+        strong.textContent = `${label}:`;
+        span.appendChild(strong);
+        span.append(' ', value ?? '—');
+        return span;
+    }
+
+    function showDeploymentError(message) {
+        if (deploymentActivityError) {
+            deploymentActivityError.textContent = message;
+            deploymentActivityError.style.display = '';
+        }
+    }
+
+    function hideDeploymentError() {
+        if (deploymentActivityError) {
+            deploymentActivityError.textContent = '';
+            deploymentActivityError.style.display = 'none';
+        }
+    }
+
+    function clearDeploymentPoll(id) {
+        const timer = deploymentPollTimers[id];
+        if (timer) {
+            window.clearTimeout(timer);
+            delete deploymentPollTimers[id];
+        }
+    }
+
+    function scheduleDeploymentPoll(id, delay = 2000) {
+        clearDeploymentPoll(id);
+        deploymentPollTimers[id] = window.setTimeout(() => {
+            performDeploymentPoll(id);
+        }, delay);
+    }
+
+    function performDeploymentPoll(id, options = {}) {
+        const detail = state.deploymentDetails[id];
+        if (!detail) {
+            clearDeploymentPoll(id);
+            return;
+        }
+        const fetchOptions = {};
+        if (options.full) {
+            fetchOptions.full = true;
+        } else if (typeof options.after === 'number') {
+            fetchOptions.after = options.after;
+        } else if (typeof detail.lastSequence === 'number' && detail.lastSequence >= 0) {
+            fetchOptions.after = detail.lastSequence;
+        }
+        fetchDeploymentDetail(id, fetchOptions);
+    }
+
+    async function fetchDeploymentDetail(id, options = {}) {
+        const detail = state.deploymentDetails[id];
+        if (!detail || !state.endpoints || !state.endpoints.deployment_detail) {
+            return;
+        }
+        if (detail.loading) {
+            return;
+        }
+
+        detail.loading = true;
+        let url = buildDeploymentDetailUrl(state.endpoints.deployment_detail, id);
+        if (!url) {
+            detail.loading = false;
+            return;
+        }
+
+        const params = new URLSearchParams();
+        if (!options.full) {
+            const afterValue =
+                typeof options.after === 'number'
+                    ? options.after
+                    : typeof detail.lastSequence === 'number' && detail.lastSequence >= 0
+                        ? detail.lastSequence
+                        : null;
+            if (afterValue !== null && afterValue >= 0) {
+                params.set('after', String(afterValue));
+            }
+        }
+
+        const query = params.toString();
+        if (query) {
+            url += (url.includes('?') ? '&' : '?') + query;
+        }
+
+        try {
+            const response = await fetch(url, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload || payload.status !== 'ok' || !payload.deployment) {
+                throw new Error((payload && payload.message) || 'Failed to load deployment details.');
+            }
+
+            const deployment = payload.deployment;
+            detail.summary = { ...detail.summary, ...deployment };
+
+            const messages = Array.isArray(deployment.messages) ? deployment.messages : [];
+            if (messages.length) {
+                if (!Array.isArray(detail.messages)) {
+                    detail.messages = [];
+                }
+                detail.messages = detail.messages.concat(messages);
+                if (detail.messages.length > 1000) {
+                    detail.messages = detail.messages.slice(-1000);
+                }
+                const lastMessage = messages[messages.length - 1];
+                if (lastMessage && typeof lastMessage.sequence === 'number') {
+                    detail.lastSequence = lastMessage.sequence;
+                }
+            } else if (typeof deployment.next_sequence === 'number') {
+                detail.lastSequence = deployment.next_sequence - 1;
+            }
+
+            const index = state.deployments.findIndex((item) => item && item.id === deployment.id);
+            if (index !== -1) {
+                state.deployments[index] = { ...state.deployments[index], ...deployment };
+            }
+
+            detail.error = null;
+            detail.initialised = true;
+            renderDeploymentActivity();
+
+            if (deployment.status === 'running' || deployment.status === 'pending') {
+                scheduleDeploymentPoll(id);
+            } else {
+                clearDeploymentPoll(id);
+            }
+        } catch (error) {
+            detail.error = error.message || 'Failed to load deployment details.';
+            renderDeploymentActivity();
+            scheduleDeploymentPoll(id, 5000);
+        } finally {
+            detail.loading = false;
+        }
+    }
+
+    function renderDeploymentActivity() {
+        if (!deploymentActivityContainer || !deploymentActivityEmpty) {
+            return;
+        }
+
+        const deployments = Array.isArray(state.deployments) ? state.deployments : [];
+        if (!deployments.length) {
+            deploymentActivityContainer.style.display = 'none';
+            deploymentActivityContainer.innerHTML = '';
+            deploymentActivityEmpty.style.display = '';
+            return;
+        }
+
+        deploymentActivityEmpty.style.display = 'none';
+        deploymentActivityContainer.style.display = '';
+        deploymentActivityContainer.innerHTML = '';
+
+        const fragment = document.createDocumentFragment();
+        deployments.forEach((summary) => {
+            if (!summary || !summary.id) {
+                return;
+            }
+            const detail = state.deploymentDetails[summary.id] || {
+                messages: [],
+                summary,
+            };
+
+            const entry = document.createElement('div');
+            entry.className = 'deployment-entry';
+
+            const header = document.createElement('div');
+            header.className = 'deployment-entry-header';
+            const title = document.createElement('h3');
+            title.textContent = summary.vm_name || summary.id;
+            header.appendChild(title);
+            const badge = document.createElement('span');
+            const badgeClass = statusToBadgeClass(summary.status);
+            badge.className = 'badge' + (badgeClass ? ' ' + badgeClass : '');
+            badge.textContent = formatDeploymentStatus(summary.status);
+            header.appendChild(badge);
+            entry.appendChild(header);
+
+            const meta = document.createElement('div');
+            meta.className = 'deployment-meta';
+            meta.appendChild(createMetaItem('Agent', summary.agent_name || `#${summary.agent_id}`));
+            if (summary.profile_name) {
+                meta.appendChild(createMetaItem('Profile', summary.profile_name));
+            }
+            if (summary.parameters && typeof summary.parameters.memory_mb === 'number') {
+                meta.appendChild(createMetaItem('Memory', `${summary.parameters.memory_mb} MiB`));
+            }
+            if (summary.parameters && typeof summary.parameters.vcpus === 'number') {
+                meta.appendChild(createMetaItem('vCPUs', summary.parameters.vcpus));
+            }
+            if (summary.parameters && typeof summary.parameters.disk_gb === 'number') {
+                meta.appendChild(createMetaItem('Disk', `${summary.parameters.disk_gb} GiB`));
+            }
+            meta.appendChild(createMetaItem('Queued', formatTimestamp(summary.created_at)));
+            meta.appendChild(createMetaItem('Updated', formatTimestamp(summary.updated_at)));
+            if (typeof summary.exit_status === 'number' && summary.status && summary.status.toLowerCase() !== 'running' && summary.status.toLowerCase() !== 'pending') {
+                meta.appendChild(createMetaItem('Exit status', summary.exit_status));
+            }
+            entry.appendChild(meta);
+
+            if (detail && detail.error) {
+                const errorNotice = document.createElement('div');
+                errorNotice.className = 'notice danger';
+                errorNotice.textContent = detail.error;
+                entry.appendChild(errorNotice);
+            }
+
+            const logOutput = document.createElement('div');
+            logOutput.className = 'deployment-log-output';
+            const messages = detail && Array.isArray(detail.messages) ? detail.messages : [];
+            if (messages.length) {
+                messages.forEach((message) => {
+                    if (!message) {
+                        return;
+                    }
+                    const line = document.createElement('div');
+                    line.className = 'deployment-log-line';
+                    if (message.stream) {
+                        line.dataset.stream = message.stream;
+                    }
+                    const timestamp = document.createElement('div');
+                    timestamp.className = 'deployment-log-time';
+                    timestamp.textContent = formatLogTime(message.timestamp);
+                    const text = document.createElement('div');
+                    text.textContent = message.message || '';
+                    line.appendChild(timestamp);
+                    line.appendChild(text);
+                    logOutput.appendChild(line);
+                });
+            } else {
+                const placeholder = document.createElement('div');
+                placeholder.className = 'deployment-log-empty';
+                if (detail && detail.loading) {
+                    placeholder.textContent = 'Loading deployment logs…';
+                } else if (summary.status && summary.status.toLowerCase() === 'failed') {
+                    placeholder.textContent = 'Deployment failed before producing log output.';
+                } else if (summary.status && summary.status.toLowerCase() === 'succeeded') {
+                    placeholder.textContent = 'Deployment completed without log output.';
+                } else {
+                    placeholder.textContent = 'No log output yet.';
+                }
+                logOutput.appendChild(placeholder);
+            }
+            entry.appendChild(logOutput);
+
+            fragment.appendChild(entry);
+        });
+
+        deploymentActivityContainer.appendChild(fragment);
+    }
+
+    function scheduleDeploymentSummaryRefresh(delay = 20000) {
+        if (deploymentSummaryTimer !== null) {
+            window.clearTimeout(deploymentSummaryTimer);
+        }
+        deploymentSummaryTimer = window.setTimeout(() => {
+            refreshDeploymentSummaries();
+        }, delay);
+    }
+
+    async function refreshDeploymentSummaries(options = {}) {
+        if (!state.endpoints || !state.endpoints.deployment_logs) {
+            return;
+        }
+        if (deploymentSummaryInFlight) {
+            return;
+        }
+        deploymentSummaryInFlight = true;
+        if (deploymentSummaryTimer !== null) {
+            window.clearTimeout(deploymentSummaryTimer);
+            deploymentSummaryTimer = null;
+        }
+
+        try {
+            const response = await fetch(state.endpoints.deployment_logs, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload || payload.status !== 'ok') {
+                throw new Error((payload && payload.message) || 'Failed to load deployments.');
+            }
+
+            const deployments = Array.isArray(payload.deployments) ? payload.deployments.slice() : [];
+            deployments.sort((a, b) => {
+                const aTime = new Date(a && a.created_at ? a.created_at : 0).getTime();
+                const bTime = new Date(b && b.created_at ? b.created_at : 0).getTime();
+                return bTime - aTime;
+            });
+            state.deployments = deployments;
+
+            const seen = new Set();
+            deployments.forEach((summary) => {
+                if (!summary || !summary.id) {
+                    return;
+                }
+                seen.add(summary.id);
+                const detail = state.deploymentDetails[summary.id];
+                if (detail) {
+                    detail.summary = { ...detail.summary, ...summary };
+                } else {
+                    state.deploymentDetails[summary.id] = {
+                        summary: { ...summary },
+                        messages: [],
+                        lastSequence: -1,
+                        error: null,
+                        loading: false,
+                        initialised: false,
+                    };
+                }
+            });
+
+            Object.keys(state.deploymentDetails).forEach((id) => {
+                if (!seen.has(id)) {
+                    clearDeploymentPoll(id);
+                    delete state.deploymentDetails[id];
+                }
+            });
+
+            hideDeploymentError();
+            renderDeploymentActivity();
+
+            deployments.forEach((summary) => {
+                if (!summary || !summary.id) {
+                    return;
+                }
+                const detail = state.deploymentDetails[summary.id];
+                if (!detail) {
+                    return;
+                }
+                if (!detail.initialised) {
+                    detail.initialised = true;
+                    fetchDeploymentDetail(summary.id, { full: true });
+                } else if (summary.status === 'running' || summary.status === 'pending') {
+                    scheduleDeploymentPoll(summary.id);
+                }
+            });
+        } catch (error) {
+            showDeploymentError(error.message || 'Failed to load deployments.');
+            renderDeploymentActivity();
+        } finally {
+            deploymentSummaryInFlight = false;
+            scheduleDeploymentSummaryRefresh(options.manual ? 20000 : 20000);
+        }
     }
 
     function findDeploymentProfile(profileId) {
@@ -1284,6 +1724,12 @@
         });
     }
 
+    if (deploymentRefreshButton) {
+        deploymentRefreshButton.addEventListener('click', () => {
+            refreshDeploymentSummaries({ manual: true });
+        });
+    }
+
     if (deploymentForm) {
         deploymentForm.addEventListener('submit', async (event) => {
             event.preventDefault();
@@ -1343,6 +1789,9 @@
                     throw new Error(message);
                 }
                 setDeploymentStatus(result.message || `Deployment for '${vmName}' started.`, false);
+                if (result.deployment_id) {
+                    refreshDeploymentSummaries({ manual: true });
+                }
                 if (result.credentials) {
                     if (deploymentUsername && result.credentials.username) {
                         deploymentUsername.value = result.credentials.username;
@@ -1388,6 +1837,13 @@
     window.addEventListener('beforeunload', () => {
         disconnectTerminal(false);
         disconnectVmConsole(false);
+        if (deploymentSummaryTimer !== null) {
+            window.clearTimeout(deploymentSummaryTimer);
+            deploymentSummaryTimer = null;
+        }
+        Object.keys(deploymentPollTimers).forEach((id) => {
+            clearDeploymentPoll(id);
+        });
     });
 
     function clearHostInfoTimer() {
@@ -1991,24 +2447,35 @@
             const actionsCell = document.createElement('td');
             actionsCell.className = 'vm-actions';
 
-            const makeActionButton = (label, action, variant) => {
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'button small' + (variant ? ' ' + variant : '');
-                button.textContent = label;
-                button.addEventListener('click', (event) => {
-                    event.stopPropagation();
-                    triggerVmAction(vm.name, action);
-                });
-                return button;
-            };
+        const makeActionButton = (label, action, variant, options = {}) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'button small' + (variant ? ' ' + variant : '');
+            button.textContent = label;
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                if (options.confirmMessage) {
+                    const confirmed = window.confirm(options.confirmMessage);
+                    if (!confirmed) {
+                        return;
+                    }
+                }
+                triggerVmAction(vm.name, action);
+            });
+            return button;
+        };
 
-            actionsCell.appendChild(makeActionButton('Start', 'start'));
-            actionsCell.appendChild(makeActionButton('Shutdown', 'shutdown'));
-            actionsCell.appendChild(makeActionButton('Force stop', 'force-stop', 'danger'));
-            actionsCell.appendChild(makeActionButton('Reboot', 'reboot'));
+        actionsCell.appendChild(makeActionButton('Start', 'start'));
+        actionsCell.appendChild(makeActionButton('Shutdown', 'shutdown'));
+        actionsCell.appendChild(makeActionButton('Force stop', 'force-stop', 'danger'));
+        actionsCell.appendChild(makeActionButton('Reboot', 'reboot'));
+        actionsCell.appendChild(
+            makeActionButton('Destroy', 'destroy', 'danger', {
+                confirmMessage: `Destroy ${vm.name}? This removes the virtual machine definition and associated storage.`,
+            }),
+        );
 
-            const consoleButton = document.createElement('button');
+        const consoleButton = document.createElement('button');
             consoleButton.type = 'button';
             consoleButton.className = 'button small secondary';
             consoleButton.textContent = 'Console';
@@ -2118,6 +2585,8 @@
         setVmStatus('Register a hypervisor to view its virtual machines.');
         showHostInfoPlaceholder('Register a hypervisor to monitor its performance metrics.');
     }
+
+    refreshDeploymentSummaries({ manual: true });
 })();
 </script>
 {% endblock %}

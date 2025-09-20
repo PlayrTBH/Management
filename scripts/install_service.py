@@ -161,11 +161,20 @@ def _interactive_prompt_io() -> tuple[TextIO | None, TextIO | None]:
         else:
             tty_in = tty_out = open(tty_path, "r+", encoding="utf-8", buffering=1)
     except OSError as exc:
-        raise UserInputError(
-            "Unable to prompt for initial user details because a controlling terminal "
-            "could not be accessed. Re-run the installer with --admin-name, "
-            "--admin-email, and --admin-password."
-        ) from exc
+        # Fall back to the existing standard streams when a controlling terminal
+        # is unavailable (e.g. when the installer runs inside a pipeline or
+        # container without a dedicated TTY). ``input``/``getpass`` can still
+        # consume from ``sys.stdin`` in these environments, so allow the prompts
+        # to proceed rather than aborting the installation.
+        if getattr(sys.stdin, "closed", False) or getattr(sys.stdout, "closed", False):
+            raise UserInputError(
+                "Unable to prompt for initial user details because a controlling terminal "
+                "could not be accessed. Re-run the installer with --admin-name, "
+                "--admin-email, and --admin-password."
+            ) from exc
+
+        yield sys.stdin, sys.stdout
+        return
 
     try:
         yield tty_in, tty_out

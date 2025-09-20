@@ -565,8 +565,6 @@ main() {
   done
 
   require_root
-  install_packages
-  ensure_user
 
   if [[ -z "${agent_id}" ]]; then
     agent_id="$(hostname -s 2>/dev/null || hostname)"
@@ -584,6 +582,9 @@ main() {
     error "An API key is required to authenticate with the management plane"
     exit 1
   fi
+
+  install_packages
+  ensure_user
 
   ensure_directories "${agent_home}" "${config_file}" "${DEFAULT_LOG_DIR}"
   chown -R playr-agent:playr-agent "${agent_home}" "$(dirname "${config_file}")" "${DEFAULT_LOG_DIR}"

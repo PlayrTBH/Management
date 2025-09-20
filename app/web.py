@@ -341,6 +341,28 @@ def register_ui_routes(
         script_url = html.escape(str(context.get("script_url", "")))
         curl_command = html.escape(str(context.get("curl_command", "")))
         api_help = html.escape(str(context.get("api_help", "")))
+        api_key_error = context.get("api_key_error")
+        api_key_error_html = (
+            f'<div class="alert alert--error">{html.escape(str(api_key_error))}</div>'
+            if api_key_error
+            else ""
+        )
+        generated_api_key = context.get("generated_api_key")
+        generated_api_key_html = (
+            """
+  <div class=\"callout callout--success\">
+    <p><strong>Your new API key</strong></p>
+    <code>{key}</code>
+    <p class=\"text-muted\">Copy this key now. It will not be shown again.</p>
+  </div>
+""".format(key=html.escape(str(generated_api_key)))
+            if generated_api_key
+            else ""
+        )
+        api_key_form_name = html.escape(str(context.get("api_key_form_name", "Hypervisor agent")))
+        generate_api_key_url = html.escape(
+            str(context.get("generate_api_key_url", request.url_for("ui_generate_api_key")))
+        )
         stylesheet = request.url_for("static", path="css/app.css")
         body = f"""
 <section class=\"card\">
@@ -351,6 +373,15 @@ def register_ui_routes(
   </div>
   <p>The command above downloads the signed installer from <code>{script_url}</code> and provisions QEMU, libvirt, and the reverse tunnel runtime.</p>
   <p>{api_help}</p>
+  <h2>Generate an API key</h2>
+  <p>Create a dedicated credential for hypervisors connecting back to this management plane.</p>
+{api_key_error_html}
+{generated_api_key_html}
+  <form method=\"post\" action=\"{generate_api_key_url}\" class=\"form\">
+    <label class=\"form__label\" for=\"api-key-name\">Key name</label>
+    <input class=\"form__input\" type=\"text\" id=\"api-key-name\" name=\"name\" value=\"{api_key_form_name}\" required />
+    <button type=\"submit\" class=\"button button--primary\">Generate API key</button>
+  </form>
   <h2>Non-interactive installs</h2>
   <p>Provide flags to the installer to skip prompts:</p>
   <pre><code>{curl_command} -- --api-key &lt;your-api-key&gt; --agent-id $(hostname)</code></pre>
@@ -370,6 +401,33 @@ def register_ui_routes(
         markup = _render_agent_installer_markup(context, request)
         return HTMLResponse(markup)
 
+    def _agent_installer_context(
+        request: Request,
+        user: User,
+        *,
+        generated_api_key: str | None = None,
+        api_key_error: str | None = None,
+        api_key_form_name: str | None = None,
+    ) -> Dict[str, object]:
+        script_url = request.url_for("agent_installer_script")
+        curl_command = f"curl -fsSL {script_url} | sudo bash"
+        api_help = (
+            "Use this dashboard to generate a management API key and supply it to the installer "
+            "using the --api-key flag to authorise the agent."
+        )
+        form_name = api_key_form_name if api_key_form_name is not None else "Hypervisor agent"
+        return _base_context(
+            request,
+            user,
+            script_url=script_url,
+            curl_command=curl_command,
+            api_help=api_help,
+            generated_api_key=generated_api_key,
+            api_key_error=api_key_error,
+            api_key_form_name=form_name,
+            generate_api_key_url=request.url_for("ui_generate_api_key"),
+        )
+
     async def _parse_login_form(request: Request) -> Tuple[str, str]:
         body_bytes = await request.body()
         content_type = request.headers.get("content-type", "")
@@ -384,6 +442,19 @@ def register_ui_routes(
         email = data.get("email", [""])[0]
         password = data.get("password", [""])[0]
         return email, password
+
+    async def _parse_api_key_form(request: Request) -> str:
+        body_bytes = await request.body()
+        content_type = request.headers.get("content-type", "")
+        charset = "utf-8"
+        if "charset=" in content_type:
+            charset = content_type.split("charset=", 1)[1].split(";", 1)[0].strip() or "utf-8"
+        try:
+            decoded = body_bytes.decode(charset)
+        except (LookupError, UnicodeDecodeError):
+            decoded = body_bytes.decode("utf-8", errors="ignore")
+        data = parse_qs(decoded, keep_blank_values=True)
+        return data.get("name", [""])[0]
 
     def _load_user(request: Request) -> Tuple[Optional[User], Optional[str]]:
         token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -522,20 +593,47 @@ def register_ui_routes(
             if token:
                 _clear_session_cookie(response, token)
             return response
+        context = _agent_installer_context(request, user)
+        response = _render_agent_installer_response(request, context)
+        if token:
+            _issue_session_cookie(response, token)
+        return response
 
-        script_url = request.url_for("agent_installer_script")
-        curl_command = f"curl -fsSL {script_url} | sudo bash"
-        api_help = (
-            "Generate an API key from the administration tooling and supply it to the installer "
-            "using the --api-key flag to authorise the agent."
-        )
+    @router.post(
+        "/installers/agent/api-keys",
+        response_class=HTMLResponse,
+        name="ui_generate_api_key",
+    )
+    async def generate_api_key(request: Request):
+        user, token = _load_user(request)
+        if user is None:
+            response = RedirectResponse(
+                request.url_for("ui_login"), status_code=status.HTTP_303_SEE_OTHER
+            )
+            if token:
+                _clear_session_cookie(response, token)
+            return response
 
-        context = _base_context(
+        raw_name = await _parse_api_key_form(request)
+        trimmed_name = raw_name.strip()
+        generated_key: str | None = None
+        error_message: str | None = None
+
+        if not trimmed_name:
+            error_message = "Please provide a name for the API key."
+        else:
+            try:
+                generated_key = database.create_api_key(user.id, trimmed_name)
+            except ValueError as exc:
+                error_message = str(exc)
+
+        form_name = raw_name if error_message else trimmed_name
+        context = _agent_installer_context(
             request,
             user,
-            script_url=script_url,
-            curl_command=curl_command,
-            api_help=api_help,
+            generated_api_key=generated_key,
+            api_key_error=error_message,
+            api_key_form_name=form_name,
         )
         response = _render_agent_installer_response(request, context)
         if token:

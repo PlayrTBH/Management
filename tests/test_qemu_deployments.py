@@ -21,6 +21,18 @@ class DummyRunner:
         return CommandResult(command=args, exit_status=0, stdout="ok", stderr="")
 
 
+class ListRunner(DummyRunner):
+    def run(self, args, timeout: int = 60) -> CommandResult:
+        self.calls.append((args, timeout))
+        stdout = (
+            " Id   Name                           State\n"
+            "---------------------------------------------\n"
+            " 1    vm-one                        running\n"
+            " -    vm-two                        shut off\n"
+        )
+        return CommandResult(command=args, exit_status=0, stdout=stdout, stderr="")
+
+
 def extract_script(runner: DummyRunner) -> tuple[str, int]:
     assert runner.calls, "No commands executed"
     command, timeout = runner.calls[0]
@@ -178,3 +190,60 @@ def test_deploy_vm_script_mentions_remote_override():
     assert "MANAGEMENT_QEMU_IMAGE_ROOT" in script
     assert 'CANDIDATE="$(printf' in script
 
+
+def test_list_vms_uses_system_uri_by_default(monkeypatch):
+    monkeypatch.delenv("MANAGEMENT_QEMU_LIBVIRT_URI", raising=False)
+    runner = ListRunner()
+    manager = QEMUManager(runner)
+
+    vms = manager.list_vms()
+
+    command, timeout = runner.calls[0]
+    assert timeout == 60
+    assert command == ["virsh", "--connect", "qemu:///system", "list", "--all"]
+    assert [(vm.name, vm.state, vm.id) for vm in vms] == [
+        ("vm-one", "running", "1"),
+        ("vm-two", "shut off", None),
+    ]
+
+
+def test_list_vms_respects_custom_libvirt_uri(monkeypatch):
+    runner = ListRunner()
+    monkeypatch.setenv(
+        "MANAGEMENT_QEMU_LIBVIRT_URI",
+        "qemu+ssh://hv.example.internal/system",
+    )
+    manager = QEMUManager(runner)
+
+    manager.list_vms()
+
+    command, _ = runner.calls[0]
+    assert command == [
+        "virsh",
+        "--connect",
+        "qemu+ssh://hv.example.internal/system",
+        "list",
+        "--all",
+    ]
+
+
+def test_vm_actions_use_configured_uri(monkeypatch):
+    runner = DummyRunner()
+    monkeypatch.setenv("MANAGEMENT_QEMU_LIBVIRT_URI", "qemu+ssh://hv.local/system")
+    manager = QEMUManager(runner)
+
+    manager.start_vm("vm-one")
+    manager.shutdown_vm("vm-two")
+    manager.force_stop_vm("vm-three")
+    manager.reboot_vm("vm-four")
+    manager.get_vm_info("vm-five")
+
+    expected_prefix = ["virsh", "--connect", "qemu+ssh://hv.local/system"]
+    commands = [call[0] for call in runner.calls]
+    assert commands == [
+        expected_prefix + ["start", "vm-one"],
+        expected_prefix + ["shutdown", "vm-two"],
+        expected_prefix + ["destroy", "vm-three"],
+        expected_prefix + ["reboot", "vm-four"],
+        expected_prefix + ["dominfo", "vm-five"],
+    ]

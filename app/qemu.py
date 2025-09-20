@@ -91,6 +91,8 @@ class VMDeploymentProfile:
 
 _IMAGE_ROOT_ENV_VAR = "MANAGEMENT_QEMU_IMAGE_ROOT"
 _DEFAULT_IMAGE_ROOT = "/var/lib/libvirt/images/playrservers"
+_LIBVIRT_URI_ENV_VAR = "MANAGEMENT_QEMU_LIBVIRT_URI"
+_DEFAULT_LIBVIRT_URI = "qemu:///system"
 
 
 def _resolve_image_root() -> str:
@@ -112,6 +114,30 @@ def _resolve_image_root() -> str:
         )
 
     return str(path)
+
+
+def _resolve_libvirt_uri() -> str:
+    """Return the libvirt connection URI used for virsh commands."""
+
+    raw_value = os.getenv(_LIBVIRT_URI_ENV_VAR)
+    if raw_value is None:
+        return _DEFAULT_LIBVIRT_URI
+
+    candidate = raw_value.strip()
+    if not candidate:
+        return _DEFAULT_LIBVIRT_URI
+    return candidate
+
+
+def build_virsh_command(*args: str) -> List[str]:
+    """Construct a virsh command that targets the configured libvirt URI."""
+
+    command = ["virsh"]
+    uri = _resolve_libvirt_uri()
+    if uri:
+        command.extend(["--connect", uri])
+    command.extend(args)
+    return command
 
 
 def _image_root_shell_preamble() -> str:
@@ -532,7 +558,7 @@ class QEMUManager:
         self._runner = runner
 
     def list_vms(self) -> List[VMInfo]:
-        result = self._runner.run(["virsh", "list", "--all"])
+        result = self._runner.run(build_virsh_command("list", "--all"))
         if result.exit_status != 0:
             raise QEMUError("Failed to list virtual machines", result)
 
@@ -552,19 +578,19 @@ class QEMUManager:
         return vms
 
     def start_vm(self, name: str) -> CommandResult:
-        return self._execute(["virsh", "start", name], f"start virtual machine '{name}'")
+        return self._execute(["start", name], f"start virtual machine '{name}'")
 
     def shutdown_vm(self, name: str) -> CommandResult:
-        return self._execute(["virsh", "shutdown", name], f"shutdown virtual machine '{name}'")
+        return self._execute(["shutdown", name], f"shutdown virtual machine '{name}'")
 
     def force_stop_vm(self, name: str) -> CommandResult:
-        return self._execute(["virsh", "destroy", name], f"force stop virtual machine '{name}'")
+        return self._execute(["destroy", name], f"force stop virtual machine '{name}'")
 
     def reboot_vm(self, name: str) -> CommandResult:
-        return self._execute(["virsh", "reboot", name], f"reboot virtual machine '{name}'")
+        return self._execute(["reboot", name], f"reboot virtual machine '{name}'")
 
     def get_vm_info(self, name: str) -> CommandResult:
-        return self._execute(["virsh", "dominfo", name], f"retrieve information for virtual machine '{name}'")
+        return self._execute(["dominfo", name], f"retrieve information for virtual machine '{name}'")
 
     def deploy_vm(
         self,
@@ -618,7 +644,8 @@ class QEMUManager:
             )
         return result
 
-    def _execute(self, command: List[str], action: str) -> CommandResult:
+    def _execute(self, args: Sequence[str], action: str) -> CommandResult:
+        command = build_virsh_command(*args)
         try:
             result = self._runner.run(command)
         except SSHError as exc:
@@ -636,4 +663,5 @@ __all__ = [
     "VMDeploymentProfile",
     "get_vm_deployment_profiles",
     "get_vm_deployment_profile",
+    "build_virsh_command",
 ]

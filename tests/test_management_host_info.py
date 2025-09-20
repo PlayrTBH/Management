@@ -26,7 +26,7 @@ class FakeRunner:
     def run(self, args, timeout: int = 60) -> CommandResult:
         self.commands.append(list(args))
         joined = " ".join(args)
-        if joined == "virsh nodeinfo":
+        if joined == "virsh --connect qemu:///system nodeinfo":
             stdout = """CPU model: x86_64\nCPU(s): 4\nCPU frequency: 2400 MHz\nMemory size: 16777216 KiB\n"""
             return CommandResult(command=args, exit_status=0, stdout=stdout, stderr="")
         if joined == "uname -sr":
@@ -102,7 +102,7 @@ def test_host_info_endpoint_returns_metrics(tmp_path):
 
     assert payload["collected_at"].endswith("Z")
     assert runner.commands == [
-        ["virsh", "nodeinfo"],
+        ["virsh", "--connect", "qemu:///system", "nodeinfo"],
         ["uname", "-sr"],
         ["cat", "/proc/loadavg"],
         ["free", "-b"],

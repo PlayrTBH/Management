@@ -110,6 +110,7 @@ environment variables:
 | `MANAGEMENT_AGENT_KNOWN_HOSTS_PATH` | Known hosts file path applied to auto-registered agents       | unset                          |
 | `MANAGEMENT_AGENT_CLOSE_OTHER_SESSIONS` | Whether agents should terminate other SSH sessions          | `true`                         |
 | `MANAGEMENT_QEMU_IMAGE_ROOT`       | Base directory on the hypervisor for downloaded images, seeds, and unattended media (must already be writable by the SSH automation user) | `/var/lib/libvirt/images/playrservers` |
+| `MANAGEMENT_QEMU_LIBVIRT_URI`      | Libvirt connection URI used when issuing `virsh` commands to remote hypervisors | `qemu:///system` |
 
 
 The systemd unit installed by `scripts/install.sh` sources `/etc/manage-playrservers.env`

@@ -194,6 +194,31 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertEqual(agent_info["agent_id"], "agent-list")
             self.assertEqual(agent_info["hostname"], "hypervisor-list")
 
+    def test_agent_endpoints_accept_api_keys(self) -> None:
+        api_key = self.database.create_api_key(self.user.id, "Test agent key")
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        headers = {"Authorization": f"Bearer {api_key}"}
+
+        with TestClient(app) as client:
+            connect = client.post(
+                "/v1/agents/connect",
+                headers=headers,
+                json={"agent_id": "key-agent", "hostname": "hypervisor-key"},
+            )
+            self.assertEqual(connect.status_code, 200, connect.text)
+            payload = connect.json()
+            session_id = payload["session_id"]
+            token = payload["agent_token"]
+
+            heartbeat = client.post(
+                "/v1/agents/key-agent/heartbeat",
+                headers=headers,
+                json={"session_id": session_id, "agent_token": token},
+            )
+            self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+
     def test_web_login_and_dashboard_flow(self) -> None:
         registry = AgentRegistry()
         app = create_app(database=self.database, registry=registry)

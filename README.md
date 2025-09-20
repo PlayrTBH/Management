@@ -66,6 +66,29 @@ python scripts/install_service.py \
 All three options must be supplied together, and the password must be at least
 12 characters long.
 
+### Hypervisor agent deployment
+
+The management interface exposes a ready-made installer for remote hypervisors
+at `https://<host>/agent`. Execute it directly on a supported Ubuntu system to
+provision QEMU, libvirt, and the PlayrServers agent runtime:
+
+```bash
+curl -fsSL https://<host>/agent | sudo bash
+```
+
+Create an API key for the agent using the bundled helper and supply it to the
+installer when prompted:
+
+```bash
+python scripts/create_api_key.py admin@example.com --name "DC-1 hypervisor"
+curl -fsSL https://<host>/agent | sudo bash -s -- --api-key psm_xxxxx --agent-id hypervisor-01
+```
+
+Agents authenticate back to the management plane using this API key, install
+their own systemd service, and maintain an encrypted reverse tunnel to
+`manage.playrservers.com` so the dashboard can expose web-based SSH sessions and
+issue VM management commands.
+
 ### Manual setup
 
 Create a virtual environment and install the web-service dependencies:

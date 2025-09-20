@@ -104,11 +104,65 @@ def test_deploy_endpoint_invokes_manager(app):
         assert payload["status"] == "ok"
         assert "credentials" in payload
         assert payload["credentials"]["username"] == "playradmin"
+        assert payload["credentials"]["password"] == "PlayrServers!23"
         assert manager.calls
         profile_id, vm_name, kwargs = manager.calls[0]
         assert profile_id == "ubuntu-24-04"
         assert vm_name == "vm-alpha"
         assert kwargs["memory_mb"] == 4096
+        assert kwargs["username"] == "playradmin"
+        assert kwargs["password"] == "PlayrServers!23"
+
+
+def test_deploy_endpoint_accepts_custom_credentials(app):
+    manager = StubManager()
+    app.state.qemu_manager_factory = lambda agent: manager
+
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.post(
+            "/management/agents/1/deployments",
+            json={
+                "profile_id": "ubuntu-24-04",
+                "vm_name": "vm-delta",
+                "username": " customadmin ",
+                "password": "SuperSecurePass1!",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "ok"
+        assert payload["credentials"]["username"] == "customadmin"
+        assert payload["credentials"]["password"] == "SuperSecurePass1!"
+        assert manager.calls
+        profile_id, vm_name, kwargs = manager.calls[0]
+        assert profile_id == "ubuntu-24-04"
+        assert vm_name == "vm-delta"
+        assert kwargs["username"] == "customadmin"
+        assert kwargs["password"] == "SuperSecurePass1!"
+
+
+def test_deploy_endpoint_rejects_invalid_password(app):
+    manager = StubManager()
+    app.state.qemu_manager_factory = lambda agent: manager
+
+    with TestClient(app) as client:
+        authenticate(client)
+        response = client.post(
+            "/management/agents/1/deployments",
+            json={
+                "profile_id": "ubuntu-24-04",
+                "vm_name": "vm-epsilon",
+                "password": "short",
+            },
+        )
+
+        assert response.status_code == 400
+        payload = response.json()
+        assert payload["status"] == "error"
+        assert "Password must be" in payload["message"]
+        assert not manager.calls
 
 
 def test_deploy_endpoint_reports_host_key_error(app):

@@ -152,10 +152,15 @@
                 <div class="deployment-credentials">
                     <div>
                         <h3>Default credentials</h3>
-                        <dl class="credential-list">
-                            <div><dt>Username</dt><dd id="deployment-username">—</dd></div>
-                            <div><dt>Password</dt><dd id="deployment-password">—</dd></div>
-                        </dl>
+                        <div class="field">
+                            <label for="deployment-username">Username</label>
+                            <input type="text" id="deployment-username" name="username" required maxlength="32" autocomplete="username">
+                        </div>
+                        <div class="field">
+                            <label for="deployment-password">Password</label>
+                            <input type="text" id="deployment-password" name="password" required minlength="12" maxlength="128" autocomplete="new-password" placeholder="Generate a strong password">
+                            <p class="help-text">Passwords must be at least 12 characters and cannot include spaces or colons.</p>
+                        </div>
                         <p class="help-text" id="deployment-notes"></p>
                     </div>
                     <div>
@@ -358,6 +363,8 @@
     const deploymentVcpusInput = document.getElementById('deployment-vcpus');
     const deploymentDiskInput = document.getElementById('deployment-disk');
     const deploymentAgentBadge = document.getElementById('deployment-selected-agent');
+    const deploymentUsernameDefaultPlaceholder = deploymentUsername ? deploymentUsername.getAttribute('placeholder') || '' : '';
+    const deploymentPasswordDefaultPlaceholder = deploymentPassword ? deploymentPassword.getAttribute('placeholder') || '' : '';
     const vmConsoleLabel = document.getElementById('vm-console-label');
     const vmConsolePlaceholder = document.getElementById('vm-console-placeholder');
     const vmConsoleSection = document.getElementById('vm-console-section');
@@ -491,10 +498,12 @@
                 deploymentDownloadLink.textContent = 'Unavailable';
             }
             if (deploymentUsername) {
-                deploymentUsername.textContent = '—';
+                deploymentUsername.value = '';
+                deploymentUsername.placeholder = deploymentUsernameDefaultPlaceholder;
             }
             if (deploymentPassword) {
-                deploymentPassword.textContent = '—';
+                deploymentPassword.value = '';
+                deploymentPassword.placeholder = deploymentPasswordDefaultPlaceholder;
             }
             if (deploymentVariant) {
                 deploymentVariant.textContent = '—';
@@ -531,10 +540,16 @@
             }
         }
         if (deploymentUsername) {
-            deploymentUsername.textContent = profile.default_username || '—';
+            if (resetValues) {
+                deploymentUsername.value = profile.default_username || '';
+            }
+            deploymentUsername.placeholder = profile.default_username || deploymentUsernameDefaultPlaceholder;
         }
         if (deploymentPassword) {
-            deploymentPassword.textContent = profile.default_password || '—';
+            if (resetValues) {
+                deploymentPassword.value = profile.default_password || '';
+            }
+            deploymentPassword.placeholder = profile.default_password || deploymentPasswordDefaultPlaceholder;
         }
         if (deploymentVariant) {
             deploymentVariant.textContent = profile.os_variant || '—';
@@ -1304,6 +1319,8 @@
                 memory_mb: deploymentMemoryInput ? deploymentMemoryInput.value : undefined,
                 vcpus: deploymentVcpusInput ? deploymentVcpusInput.value : undefined,
                 disk_gb: deploymentDiskInput ? deploymentDiskInput.value : undefined,
+                username: deploymentUsername ? deploymentUsername.value.trim() || undefined : undefined,
+                password: deploymentPassword ? deploymentPassword.value || undefined : undefined,
             };
 
             setDeploymentStatus(`Starting deployment on ${agent.name}…`);
@@ -1326,12 +1343,23 @@
                     throw new Error(message);
                 }
                 setDeploymentStatus(result.message || `Deployment for '${vmName}' started.`, false);
-                if (result.profile) {
+                if (result.credentials) {
+                    if (deploymentUsername && result.credentials.username) {
+                        deploymentUsername.value = result.credentials.username;
+                        deploymentUsername.placeholder = result.credentials.username;
+                    }
+                    if (deploymentPassword && result.credentials.password) {
+                        deploymentPassword.value = result.credentials.password;
+                        deploymentPassword.placeholder = result.credentials.password;
+                    }
+                } else if (result.profile) {
                     if (deploymentUsername && result.profile.default_username) {
-                        deploymentUsername.textContent = result.profile.default_username;
+                        deploymentUsername.value = result.profile.default_username;
+                        deploymentUsername.placeholder = result.profile.default_username;
                     }
                     if (deploymentPassword && result.profile.default_password) {
-                        deploymentPassword.textContent = result.profile.default_password;
+                        deploymentPassword.value = result.profile.default_password;
+                        deploymentPassword.placeholder = result.profile.default_password;
                     }
                 }
                 await fetchVms(agent);

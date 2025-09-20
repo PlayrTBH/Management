@@ -23,6 +23,7 @@ from .models import Agent, User
 from .qemu import (
     QEMUError,
     QEMUManager,
+    build_virsh_command,
     get_vm_deployment_profile,
     get_vm_deployment_profiles,
 )
@@ -1204,7 +1205,7 @@ def create_app(
         runner = _build_ssh_runner(agent)
 
         try:
-            nodeinfo_result = runner.run(["virsh", "nodeinfo"])
+            nodeinfo_result = runner.run(build_virsh_command("nodeinfo"))
         except HostKeyVerificationError as exc:
             return JSONResponse(
                 status_code=status.HTTP_502_BAD_GATEWAY,

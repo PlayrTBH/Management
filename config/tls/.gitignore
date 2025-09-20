@@ -1,0 +1,4 @@
+# Ignore generated TLS materials but keep documentation
+*
+!.gitignore
+!README.md

@@ -108,6 +108,13 @@
         .button.secondary:hover {
             background: rgba(148, 163, 184, 0.1);
         }
+        .button.danger {
+            background: rgba(248, 113, 113, 0.88);
+            color: #0f172a;
+        }
+        .button.danger:hover {
+            background: rgba(248, 113, 113, 1);
+        }
         .field {
             display: flex;
             flex-direction: column;
@@ -168,6 +175,68 @@
             background: rgba(251, 191, 36, 0.12);
             border-color: rgba(251, 191, 36, 0.35);
             color: #fef08a;
+        }
+        .deployment-activity-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        .deployment-entry {
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 14px;
+            padding: 1.25rem;
+            background: rgba(15, 23, 42, 0.45);
+        }
+        .deployment-entry-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            margin-bottom: 0.75rem;
+        }
+        .deployment-entry-header h3 {
+            margin: 0;
+            font-size: 1.05rem;
+        }
+        .deployment-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+            font-size: 0.85rem;
+            color: var(--muted);
+        }
+        .deployment-log-output {
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 12px;
+            padding: 0.75rem 1rem;
+            max-height: 260px;
+            overflow-y: auto;
+            font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+        .deployment-log-line {
+            display: grid;
+            grid-template-columns: 4.25rem 1fr;
+            gap: 0.75rem;
+            padding: 0.2rem 0;
+            word-break: break-word;
+        }
+        .deployment-log-line[data-stream="stderr"] {
+            color: var(--danger);
+        }
+        .deployment-log-line[data-stream="info"] {
+            color: #bae6fd;
+        }
+        .deployment-log-time {
+            color: var(--muted);
+            font-size: 0.75rem;
+        }
+        .deployment-log-empty {
+            color: var(--muted);
+            font-size: 0.9rem;
         }
         pre {
             background: rgba(15, 23, 42, 0.6);
@@ -287,6 +356,10 @@
         .badge.danger {
             background: rgba(248, 113, 113, 0.25);
             color: #fecaca;
+        }
+        .badge.info {
+            background: rgba(56, 189, 248, 0.25);
+            color: #bae6fd;
         }
         .table-wrapper {
             overflow-x: auto;

@@ -237,6 +237,7 @@ def test_vm_actions_use_configured_uri(monkeypatch):
     manager.force_stop_vm("vm-three")
     manager.reboot_vm("vm-four")
     manager.get_vm_info("vm-five")
+    manager.destroy_vm("vm-six")
 
     expected_prefix = ["virsh", "--connect", "qemu+ssh://hv.local/system"]
     commands = [call[0] for call in runner.calls]
@@ -246,4 +247,5 @@ def test_vm_actions_use_configured_uri(monkeypatch):
         expected_prefix + ["destroy", "vm-three"],
         expected_prefix + ["reboot", "vm-four"],
         expected_prefix + ["dominfo", "vm-five"],
+        expected_prefix + ["undefine", "vm-six", "--remove-all-storage", "--nvram"],
     ]

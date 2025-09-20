@@ -1,6 +1,7 @@
 """Browser-based management interface for the PlayrServers control plane."""
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -19,6 +20,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketState
 
 from .database import Database, resolve_database_path
+from .deployments import DeploymentLogManager
 from .models import Agent, User
 from .qemu import (
     QEMUError,
@@ -78,6 +80,8 @@ def create_app(
     )
     app.state.database = database
     app.state.public_api_url = api_base_url
+    if not hasattr(app.state, "deployment_logs"):
+        app.state.deployment_logs = DeploymentLogManager()
 
     secure_cookie_setting = os.getenv("MANAGEMENT_SESSION_SECURE")
     if secure_cookie_setting is None:
@@ -196,6 +200,32 @@ def create_app(
 
         runner = _build_ssh_runner(agent)
         return QEMUManager(runner)
+
+    def _get_deployment_logs() -> DeploymentLogManager:
+        manager = getattr(app.state, "deployment_logs", None)
+        if manager is None:
+            manager = DeploymentLogManager()
+            app.state.deployment_logs = manager
+        return manager
+
+    def _schedule_background_task(coro) -> None:
+        runner = getattr(app.state, "deployment_task_runner", None)
+        if callable(runner):
+            try:
+                result = runner(coro)
+            except Exception:
+                logger.exception("Deployment task runner failed to schedule coroutine")
+                return
+            if inspect.isawaitable(result):
+                asyncio.create_task(result)
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+        else:
+            loop.create_task(coro)
 
     def _command_result_payload(result) -> Dict[str, object]:
         return {
@@ -536,6 +566,14 @@ def create_app(
                     "management_vm_console", agent_id=0, vm_name="__VM__"
                 )
             ),
+            "deployment_logs": str(
+                request.url_for("management_list_deployments")
+            ),
+            "deployment_detail": str(
+                request.url_for(
+                    "management_get_deployment", deployment_id="__DEPLOYMENT__"
+                )
+            ),
         }
 
         deployment_profiles = [
@@ -859,6 +897,7 @@ def create_app(
             "shutdown": manager.shutdown_vm,
             "force-stop": manager.force_stop_vm,
             "reboot": manager.reboot_vm,
+            "destroy": manager.destroy_vm,
         }
         operation = operations.get(action)
         if operation is None:
@@ -941,68 +980,6 @@ def create_app(
                 content={"status": "error", "message": str(exc)},
             )
 
-        manager = _build_qemu_manager(agent)
-
-        try:
-            result = manager.deploy_vm(
-                profile.id,
-                vm_name,
-                memory_mb=memory_mb,
-                vcpus=vcpus,
-                disk_gb=disk_gb,
-                username=resolved_username,
-                password=resolved_password,
-            )
-        except ValueError as exc:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"status": "error", "message": str(exc)},
-            )
-        except HostKeyVerificationError as exc:
-            return JSONResponse(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                content={
-                    "status": "error",
-                    "message": str(exc),
-                    "code": "host_key_verification_failed",
-                    "hostname": exc.hostname,
-                    "port": exc.port or agent.port,
-                },
-            )
-        except QEMUError as exc:
-            result_payload = None
-            if getattr(exc, "result", None) is not None:
-                result_payload = _command_result_payload(exc.result)
-
-            log_message = str(exc)
-            if result_payload is not None:
-                log_message = (
-                    f"{log_message} "
-                    f"(exit_status={result_payload['exit_status']}, "
-                    f"stdout={result_payload['stdout']!r}, "
-                    f"stderr={result_payload['stderr']!r})"
-                )
-
-            logger.error(
-                "VM deployment failed for '%s' on agent '%s' (id=%d, %s@%s:%s) using profile '%s': %s",
-                vm_name,
-                agent.name,
-                agent.id,
-                agent.username,
-                agent.hostname,
-                agent.port,
-                profile.id,
-                log_message,
-            )
-
-            error_payload: Dict[str, object] = {"status": "error", "message": str(exc)}
-            if result_payload is not None:
-                error_payload["result"] = result_payload
-            return JSONResponse(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                content=error_payload,
-            )
-
         def _resolve(value, default):
             if value is None:
                 return default
@@ -1022,9 +999,110 @@ def create_app(
             resolved_vcpus = profile.default_vcpus
             resolved_disk = profile.default_disk_gb
 
+        deployment_logs = _get_deployment_logs()
+        record = deployment_logs.create(
+            user_id=user.id,
+            agent_id=agent.id,
+            agent_name=agent.name,
+            vm_name=vm_name,
+            profile_id=profile.id,
+            profile_name=profile.name,
+            parameters={
+                "memory_mb": resolved_memory,
+                "vcpus": resolved_vcpus,
+                "disk_gb": resolved_disk,
+            },
+        )
+        deployment_logs.append_message(
+            record.id,
+            "info",
+            f"Deployment queued on {agent.name} ({agent.hostname}).",
+        )
+
+        manager = _build_qemu_manager(agent)
+
+        async def run_deployment_task():
+            deployment_logs.mark_running(record.id)
+            deployment_logs.append_message(
+                record.id,
+                "info",
+                f"Starting deployment for '{vm_name}' using profile '{profile.name}'.",
+            )
+
+            def handle_stdout(chunk: str) -> None:
+                deployment_logs.append_stream(record.id, "stdout", chunk)
+
+            def handle_stderr(chunk: str) -> None:
+                deployment_logs.append_stream(record.id, "stderr", chunk)
+
+            def _deploy_vm_sync():
+                return manager.deploy_vm(
+                    profile.id,
+                    vm_name,
+                    memory_mb=resolved_memory,
+                    vcpus=resolved_vcpus,
+                    disk_gb=resolved_disk,
+                    username=resolved_username,
+                    password=resolved_password,
+                    stream_stdout=handle_stdout,
+                    stream_stderr=handle_stderr,
+                )
+
+            try:
+                result = await anyio.to_thread.run_sync(
+                    _deploy_vm_sync,
+                    abandon_on_cancel=True,
+                )
+            except ValueError as exc:
+                deployment_logs.mark_failed(record.id, str(exc))
+            except HostKeyVerificationError as exc:
+                deployment_logs.mark_failed(record.id, str(exc))
+            except QEMUError as exc:
+                command_result = getattr(exc, "result", None)
+                log_message = str(exc)
+                if command_result is not None:
+                    payload = _command_result_payload(command_result)
+                    log_message = (
+                        f"{log_message} "
+                        f"(exit_status={payload['exit_status']}, "
+                        f"stdout={payload['stdout']!r}, "
+                        f"stderr={payload['stderr']!r})"
+                    )
+
+                logger.error(
+                    "VM deployment failed for '%s' on agent '%s' (id=%d, %s@%s:%s) using profile '%s': %s",
+                    vm_name,
+                    agent.name,
+                    agent.id,
+                    agent.username,
+                    agent.hostname,
+                    agent.port,
+                    profile.id,
+                    log_message,
+                )
+                deployment_logs.mark_failed(record.id, str(exc), command_result)
+            except SSHError as exc:
+                deployment_logs.mark_failed(record.id, str(exc))
+            except Exception:
+                logger.exception(
+                    "Unhandled exception during deployment for '%s' on agent '%s' (id=%d)",
+                    vm_name,
+                    agent.name,
+                    agent.id,
+                )
+                deployment_logs.mark_failed(
+                    record.id,
+                    "Deployment failed due to an unexpected error.",
+                )
+            else:
+                deployment_logs.mark_success(record.id, result)
+
+        _schedule_background_task(run_deployment_task())
+
         response_payload = {
             "status": "ok",
-            "message": f"Deployment for '{vm_name}' started on {agent.name}.",
+            "message": f"Deployment for '{vm_name}' queued on {agent.name}.",
+            "deployment_id": record.id,
             "profile": profile.to_public_dict(),
             "parameters": {
                 "memory_mb": resolved_memory,
@@ -1035,10 +1113,63 @@ def create_app(
                 "username": resolved_username,
                 "password": resolved_password,
             },
-            "result": _command_result_payload(result),
         }
 
-        return JSONResponse(content=response_payload)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=response_payload,
+        )
+
+    @app.get("/management/deployments", name="management_list_deployments")
+    async def management_list_deployments(request: Request):
+        user = _get_current_user(request)
+        if user is None:
+            return _json_auth_error()
+
+        deployments = _get_deployment_logs().list_for_user(user.id)
+        return JSONResponse(
+            content={"status": "ok", "deployments": deployments}
+        )
+
+    @app.get(
+        "/management/deployments/{deployment_id}",
+        name="management_get_deployment",
+    )
+    async def management_get_deployment(
+        request: Request, deployment_id: str
+    ):
+        user = _get_current_user(request)
+        if user is None:
+            return _json_auth_error()
+
+        after_param = request.query_params.get("after")
+        after_sequence: Optional[int] = None
+        if after_param is not None:
+            try:
+                after_sequence = int(after_param)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={
+                        "status": "error",
+                        "message": "Invalid 'after' parameter.",
+                    },
+                )
+            if after_sequence < 0:
+                after_sequence = None
+
+        deployment = _get_deployment_logs().get_for_user(
+            user.id, deployment_id, after=after_sequence
+        )
+        if deployment is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": "Deployment not found."},
+            )
+
+        return JSONResponse(
+            content={"status": "ok", "deployment": deployment}
+        )
 
     @app.websocket("/management/agents/{agent_id}/terminal", name="management_agent_terminal")
     async def management_agent_terminal(websocket: WebSocket, agent_id: int):

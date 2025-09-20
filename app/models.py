@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,18 @@ class AgentCommand:
 
 
 @dataclass(frozen=True)
+class AgentCommandReply:
+    """Stores data returned by an agent after executing a command."""
+
+    id: int
+    user_id: int
+    command_id: int
+    data: Dict[str, object]
+    created_at: datetime
+    acknowledged_at: Optional[datetime]
+
+
+@dataclass(frozen=True)
 class ProvisioningKeyPair:
     """Stores SSH key material generated for a user profile."""
 
@@ -54,4 +66,10 @@ class ProvisioningKeyPair:
     public_key: str
     created_at: datetime
 
-__all__ = ["Agent", "AgentCommand", "ProvisioningKeyPair", "User"]
+__all__ = [
+    "Agent",
+    "AgentCommand",
+    "AgentCommandReply",
+    "ProvisioningKeyPair",
+    "User",
+]

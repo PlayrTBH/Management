@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-from collections import deque
 from getpass import getpass
 from pathlib import Path
 from typing import Sequence
@@ -113,6 +112,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="Base URL of a running management service (default: https://localhost)",
     )
+    admin_parser.add_argument(
+        "--hypervisor-email",
+        default=None,
+        help=(
+            "Account email whose paired hypervisors should be listed by the admin console. "
+            "Defaults to the MANAGEMENT_CLI_EMAIL environment variable when unset."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -182,7 +189,12 @@ def _serve(
     )
 
 
-def _run_admin_cli(database: Database, *, default_service_url: str | None = None) -> None:
+def _run_admin_cli(
+    database: Database,
+    *,
+    default_service_url: str | None = None,
+    hypervisor_email: str | None = None,
+) -> None:
     """Provide an interactive management console for administrators."""
 
     service_url = default_service_url or _DEFAULT_SERVICE_URL
@@ -208,7 +220,9 @@ def _run_admin_cli(database: Database, *, default_service_url: str | None = None
             elif choice == "2":
                 _add_user(database)
             elif choice == "3":
-                service_url = _show_hypervisors(service_url)
+                service_url = _show_hypervisors(
+                    service_url, default_email=hypervisor_email
+                )
             elif choice == "4":
                 _run_tests()
             elif choice == "5":
@@ -278,16 +292,24 @@ def _prompt_for_password() -> str | None:
     return None
 
 
-def _show_hypervisors(default_url: str) -> str:
-    prompt_default = default_url or _DEFAULT_SERVICE_URL
-    base_url = input(f"Service URL [{prompt_default}]: ").strip() or prompt_default
+def _show_hypervisors(default_url: str, *, default_email: str | None = None) -> str:
+    base_url = default_url or _DEFAULT_SERVICE_URL
 
-    email = input("Administrator email: ").strip()
+    email = default_email or os.getenv("MANAGEMENT_CLI_EMAIL")
     if not email:
-        print("An email address is required to authenticate with the service.")
+        print(
+            "No management account email configured. Provide --hypervisor-email when launching "
+            "the admin console or set the MANAGEMENT_CLI_EMAIL environment variable."
+        )
         return base_url
 
-    password = getpass("Administrator password: ")
+    password = os.getenv("MANAGEMENT_CLI_PASSWORD")
+    if not password:
+        print(
+            "No management account password available. Set the MANAGEMENT_CLI_PASSWORD "
+            "environment variable before running this command."
+        )
+        return base_url
 
     endpoint = base_url.rstrip("/") + "/v1/agents"
 
@@ -298,7 +320,10 @@ def _show_hypervisors(default_url: str) -> str:
         return base_url
 
     if response.status_code == 401:
-        print("Authentication failed. Please verify your credentials.")
+        print(
+            "Authentication failed when querying the management service. Verify the "
+            "configured credentials."
+        )
         return base_url
     if response.status_code != 200:
         print(f"Service responded with {response.status_code}: {response.text.strip()}")
@@ -312,10 +337,10 @@ def _show_hypervisors(default_url: str) -> str:
     agents = payload.get("agents", [])
 
     if not agents:
-        print("No hypervisors are currently paired with this account.")
+        print(f"No hypervisors are currently paired with {email}.")
         return base_url
 
-    print(f"Found {len(agents)} paired hypervisor(s):")
+    print(f"Found {len(agents)} paired hypervisor(s) for {email}:")
     for agent in agents:
         agent_id = agent.get("agent_id", "unknown-agent")
         hostname = agent.get("hostname", "unknown-host")
@@ -338,32 +363,34 @@ def _run_tests() -> None:
 
 
 def _view_logs() -> None:
-    default_path = _project_root() / "logs" / "service.log"
-    path_text = input(f"Log file path [{default_path}]: ").strip()
-    log_path = Path(path_text).expanduser() if path_text else default_path
-
-    if not log_path.exists():
-        print(f"No log file found at {log_path}.")
+    journalctl_path = shutil.which("journalctl")
+    if not journalctl_path:
+        print("journalctl is not available on this system. Unable to display service logs.")
         return
 
-    num_lines_text = input("Number of lines to display [20]: ").strip()
-    if num_lines_text:
-        try:
-            num_lines = max(1, int(num_lines_text))
-        except ValueError:
-            print("Please enter a valid number of lines.")
-            return
-    else:
-        num_lines = 20
+    command = [
+        journalctl_path,
+        "-u",
+        SYSTEMD_SERVICE_NAME,
+        "-n",
+        "20",
+        "--no-pager",
+    ]
 
-    with log_path.open("r", encoding="utf-8", errors="replace") as handle:
-        lines = list(deque(handle, maxlen=num_lines))
+    print(f"Collecting the last 20 log entries for {SYSTEMD_SERVICE_NAME}...")
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
 
-    print(f"\nLast {len(lines)} line(s) from {log_path}:")
-    print("-" * 80)
-    for line in lines:
-        print(line.rstrip("\n"))
-    print("-" * 80)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or "journalctl exited with an error."
+        print(stderr)
+        return
+
+    output = result.stdout.strip()
+    if not output:
+        print("No log entries were returned by journalctl.")
+        return
+
+    print(output)
 
 
 def _update_service() -> None:
@@ -418,7 +445,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             ssl_keyfile_password=args.ssl_keyfile_password,
         )
     elif args.command == "admin":
-        _run_admin_cli(database, default_service_url=args.service_url)
+        _run_admin_cli(
+            database,
+            default_service_url=args.service_url,
+            hypervisor_email=getattr(args, "hypervisor_email", None),
+        )
     elif args.command == "init-db":
         print("Database initialisation complete.")
 

@@ -179,7 +179,7 @@ main() {
 [playrservers] Installation complete.
 The service files are located at: ${INSTALL_DIR}
 To activate the environment, run: source "${VENV_DIR}/bin/activate"
-Start the API with: "${VENV_DIR}/bin/python" "${INSTALL_DIR}/main.py" serve --host 0.0.0.0 --port 8000
+Start the API with: "${VENV_DIR}/bin/python" "${INSTALL_DIR}/main.py" serve --host 0.0.0.0 --port 443 --ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem
 EOM
 }
 

@@ -57,7 +57,7 @@ from app.database import Database, resolve_database_path
 
 logger = logging.getLogger("playrservers.main")
 
-_DEFAULT_SERVICE_URL = "http://localhost:8000"
+_DEFAULT_SERVICE_URL = "https://localhost"
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -70,7 +70,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
     serve_parser = subparsers.add_parser("serve", help="Start the HTTP management service")
     serve_parser.add_argument("--host", default="0.0.0.0", help="Bind address for the API")
-    serve_parser.add_argument("--port", type=int, default=8000, help="Port for the API")
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=443,
+        help="Port for the HTTPS API (default: 443)",
+    )
     serve_parser.add_argument(
         "--tunnel-host",
         default=None,
@@ -82,6 +87,21 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="Override the public port advertised to agents",
     )
+    serve_parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="Path to the TLS certificate chain in PEM format",
+    )
+    serve_parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="Path to the TLS private key in PEM format",
+    )
+    serve_parser.add_argument(
+        "--ssl-keyfile-password",
+        default=None,
+        help="Password for the TLS private key, if encrypted",
+    )
 
     admin_parser = subparsers.add_parser(
         "admin", help="Launch the interactive administration console"
@@ -89,7 +109,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     admin_parser.add_argument(
         "--service-url",
         default=None,
-        help="Base URL of a running management service (default: http://localhost:8000)",
+        help="Base URL of a running management service (default: https://localhost)",
     )
 
     return parser.parse_args(argv)
@@ -114,18 +134,33 @@ def _serve(
     port: int,
     tunnel_host: str | None,
     tunnel_port: int | None,
+    ssl_certfile: str | None,
+    ssl_keyfile: str | None,
+    ssl_keyfile_password: str | None,
 ) -> None:
     from app.service import create_app
     import uvicorn
 
-    logger.info("Starting management API on %s:%s", host, port)
+    if bool(ssl_certfile) ^ bool(ssl_keyfile):
+        raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
+
+    protocol = "https" if ssl_certfile and ssl_keyfile else "http"
+    logger.info("Starting management API on %s://%s:%s", protocol, host, port)
 
     app = create_app(
         database=database,
         tunnel_host=tunnel_host,
         tunnel_port=tunnel_port,
     )
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
+        ssl_keyfile_password=ssl_keyfile_password,
+    )
 
 
 def _run_admin_cli(database: Database, *, default_service_url: str | None = None) -> None:
@@ -336,6 +371,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             port=args.port,
             tunnel_host=args.tunnel_host,
             tunnel_port=args.tunnel_port,
+            ssl_certfile=args.ssl_certfile,
+            ssl_keyfile=args.ssl_keyfile,
+            ssl_keyfile_password=args.ssl_keyfile_password,
         )
     elif args.command == "admin":
         _run_admin_cli(database, default_service_url=args.service_url)

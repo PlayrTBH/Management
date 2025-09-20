@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -20,8 +20,17 @@ from .agents import (
 )
 from .database import Database, resolve_database_path
 from .models import User
+from .sessions import SessionManager
+from .web import register_ui_routes
 
 logger = logging.getLogger("playrservers.service")
+
+
+def _use_secure_cookies() -> bool:
+    raw = os.getenv("MANAGEMENT_SESSION_SECURE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 class TunnelEndpoint(BaseModel):
@@ -220,6 +229,19 @@ def create_app(
         description="Control plane for authenticated hypervisor management tunnels.",
     )
 
+    secure_cookies = _use_secure_cookies()
+    if not secure_cookies:
+        logger.warning(
+            "Session cookies are not marked as secure. Only disable secure cookies for"
+            " local development."
+        )
+
+    session_manager = SessionManager(ttl=timedelta(hours=8))
+
+    app.state.database = db
+    app.state.registry = app_registry
+    app.state.session_manager = session_manager
+
     current_user = _build_auth_dependency(db)
 
     @app.get("/healthz")
@@ -403,6 +425,14 @@ def create_app(
             agent_id=session.agent_id,
             tunnels=[_tunnel_to_view(tunnel, app_registry) for tunnel in session.tunnels.values()],
         )
+
+    register_ui_routes(
+        app,
+        db,
+        app_registry,
+        session_manager=session_manager,
+        secure_cookies=secure_cookies,
+    )
 
     return app
 

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Sign in · PlayrServers Management{% endblock %}
+
+{% block content %}
+<section class="card card--centered">
+  <h1 class="card__title">Welcome back</h1>
+  <p class="card__subtitle">
+    Sign in with your management credentials to access your account overview and paired hypervisors.
+  </p>
+  {% if error %}
+  <div class="alert alert--error">{{ error }}</div>
+  {% endif %}
+  <form method="post" action="{{ request.url_for('ui_login_submit') }}" class="form">
+    <label class="form__label" for="email">Email address</label>
+    <input
+      class="form__input"
+      type="email"
+      id="email"
+      name="email"
+      value="{{ email }}"
+      autocomplete="username"
+      required
+    />
+
+    <label class="form__label" for="password">Password</label>
+    <input
+      class="form__input"
+      type="password"
+      id="password"
+      name="password"
+      autocomplete="current-password"
+      required
+    />
+
+    <button type="submit" class="button button--primary">Sign in</button>
+  </form>
+</section>
+{% endblock %}

@@ -73,7 +73,13 @@ def run_command(command: Sequence[str]) -> None:
     subprocess.check_call(command)
 
 
-REQUIRED_PACKAGES: tuple[str, ...] = ("fastapi", "uvicorn", "httpx")
+REQUIRED_PACKAGES: tuple[str, ...] = (
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "jinja2",
+    "python-multipart",
+)
 
 
 def install_dependencies(extra_args: Sequence[str]) -> None:
@@ -388,7 +394,10 @@ def main() -> int:
     print("\nInstallation complete!\n")
     print("Next steps:")
     service_entry = ROOT / "main.py"
-    start_command = f"python {service_entry} serve --host 0.0.0.0 --port 8000"
+    start_command = (
+        f"python {service_entry} serve --host 0.0.0.0 --port 443 "
+        "--ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem"
+    )
     print(f"  • Start the API with: {start_command}")
     print(f"  • Database stored at: {db_path}")
     return 0

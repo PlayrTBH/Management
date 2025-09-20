@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}PlayrServers Management{% endblock %}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='css/app.css') }}" />
+  </head>
+  <body>
+    <header class="navbar">
+      <div class="navbar__brand">
+        <span class="navbar__logo" aria-hidden="true">⛅</span>
+        <span>PlayrServers Management</span>
+      </div>
+      {% if user %}
+      <nav class="navbar__actions" aria-label="Primary">
+        <a href="{{ request.url_for('ui_dashboard') }}" class="nav-link{% if request.url.path == request.url_for('ui_dashboard') %} nav-link--active{% endif %}">Dashboard</a>
+        <a href="{{ request.url_for('ui_logout') }}" class="nav-link">Sign out</a>
+        <span class="navbar__user">{{ user.name }}</span>
+      </nav>
+      {% endif %}
+    </header>
+
+    <main class="page">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+      <p>© {{ now().year }} PlayrServers. Secure management for your infrastructure.</p>
+    </footer>
+  </body>
+</html>

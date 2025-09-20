@@ -16,6 +16,7 @@ import anyio
 from fastapi import FastAPI, Form, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.websockets import WebSocketState
 
@@ -44,6 +45,14 @@ PASSWORD_MIN_LENGTH = 12
 
 
 logger = logging.getLogger("playrservers.management.deployments")
+
+
+def _trusted_proxy_hosts() -> list[str] | str:
+    raw = os.getenv("MANAGEMENT_TRUSTED_PROXIES")
+    if not raw:
+        return "*"
+    hosts = [item.strip() for item in raw.split(",") if item.strip()]
+    return hosts or "*"
 
 
 def create_app(
@@ -78,6 +87,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_hosts())
     app.state.database = database
     app.state.public_api_url = api_base_url
     if not hasattr(app.state, "deployment_logs"):
@@ -554,8 +564,8 @@ def create_app(
         agents = database.list_agents_for_user(user.id)
         agent_views = [_agent_to_view(agent) for agent in agents]
         for entry in agent_views:
-            entry["remove_url"] = str(
-                request.url_for("remove_agent", agent_id=entry["id"])
+            entry["remove_url"] = request.app.url_path_for(
+                "remove_agent", agent_id=entry["id"]
             )
         selected_agent: Optional[Dict[str, object]] = None
 
@@ -579,46 +589,38 @@ def create_app(
         messages = _consume_flash(request)
 
         endpoints = {
-            "list_vms": str(
-                request.url_for("management_list_vms", agent_id=0)
+            "list_vms": request.app.url_path_for(
+                "management_list_vms", agent_id=0
             ),
-            "vm_info": str(
-                request.url_for(
-                    "management_vm_info", agent_id=0, vm_name="__VM__"
-                )
+            "vm_info": request.app.url_path_for(
+                "management_vm_info", agent_id=0, vm_name="__VM__"
             ),
-            "vm_action": str(
-                request.url_for(
-                    "management_vm_action",
-                    agent_id=0,
-                    vm_name="__VM__",
-                    action="__ACTION__",
-                )
+            "vm_action": request.app.url_path_for(
+                "management_vm_action",
+                agent_id=0,
+                vm_name="__VM__",
+                action="__ACTION__",
             ),
-            "host_info": str(
-                request.url_for("management_host_info", agent_id=0)
+            "host_info": request.app.url_path_for(
+                "management_host_info", agent_id=0
             ),
-            "ssh_terminal": str(
-                request.url_for("management_agent_terminal", agent_id=0)
+            "ssh_terminal": request.app.url_path_for(
+                "management_agent_terminal", agent_id=0
             ),
-            "allow_unknown_hosts": str(
-                request.url_for("management_allow_unknown_hosts", agent_id=0)
+            "allow_unknown_hosts": request.app.url_path_for(
+                "management_allow_unknown_hosts", agent_id=0
             ),
-            "deploy_vm": str(
-                request.url_for("management_deploy_vm", agent_id=0)
+            "deploy_vm": request.app.url_path_for(
+                "management_deploy_vm", agent_id=0
             ),
-            "vm_console": str(
-                request.url_for(
-                    "management_vm_console", agent_id=0, vm_name="__VM__"
-                )
+            "vm_console": request.app.url_path_for(
+                "management_vm_console", agent_id=0, vm_name="__VM__"
             ),
-            "deployment_logs": str(
-                request.url_for("management_list_deployments")
+            "deployment_logs": request.app.url_path_for(
+                "management_list_deployments"
             ),
-            "deployment_detail": str(
-                request.url_for(
-                    "management_get_deployment", deployment_id="__DEPLOYMENT__"
-                )
+            "deployment_detail": request.app.url_path_for(
+                "management_get_deployment", deployment_id="__DEPLOYMENT__"
             ),
         }
 

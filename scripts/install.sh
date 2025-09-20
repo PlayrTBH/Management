@@ -54,10 +54,8 @@ APP_GROUP="$APP_USER"
 APP_DIR="${APP_DIR:-/opt/manage.playrservers}"
 APP_REPO="${APP_REPO:-}"
 APP_BRANCH="${APP_BRANCH:-main}"
-APP_PORT="${APP_PORT:-8000}"
+APP_PORT="${APP_PORT:-443}"
 APP_HOST="${APP_HOST:-0.0.0.0}"
-APP_API_PORT="${APP_API_PORT:-8001}"
-APP_API_HOST="${APP_API_HOST:-$APP_HOST}"
 SERVICE_NAME="${SERVICE_NAME:-manage-playrservers}"
 APP_DOMAIN="${APP_DOMAIN:-manage.playrservers.com}"
 API_DOMAIN="${API_DOMAIN:-api.playrservers.com}"
@@ -328,7 +326,7 @@ on_exit() {
         if (( SERVICE_ACTIVE == 1 )); then
             log_success "Installation complete. Service '${SERVICE_NAME}' is active."
             log_info "Management UI: http://${APP_HOST}:${APP_PORT}"
-            log_info "Automation API: http://${APP_API_HOST}:${APP_API_PORT}"
+            log_info "Automation API: http://${APP_HOST}:${APP_PORT}/api"
             log_info "Environment overrides: ${ENV_FILE}"
             if [[ "$INSTALL_NGINX" != "1" ]]; then
                 log_info "nginx configuration was skipped (INSTALL_NGINX=${INSTALL_NGINX})."
@@ -442,11 +440,11 @@ User=${APP_USER}
 Group=${APP_GROUP}
 Environment=MANAGEMENT_PORT=${APP_PORT}
 Environment=MANAGEMENT_HOST=${APP_HOST}
-Environment=MANAGEMENT_API_PORT=${APP_API_PORT}
-Environment=MANAGEMENT_API_HOST=${APP_API_HOST}
 EnvironmentFile=-${ENV_FILE}
 WorkingDirectory=${APP_DIR}
 ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/main.py
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=5
 
@@ -566,6 +564,10 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600;
     }
 }
 
@@ -574,11 +576,15 @@ server {
     server_name ${API_DOMAIN};
 
     location / {
-        proxy_pass http://${APP_API_HOST}:${APP_API_PORT};
+        proxy_pass http://${APP_HOST}:${APP_PORT}/api/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600;
     }
 }
 EOF

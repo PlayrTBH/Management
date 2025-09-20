@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Set
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from .agent_registration import (
     AgentProvisioningError,
@@ -188,6 +189,14 @@ def agent_to_target(agent: Agent) -> SSHTarget:
     )
 
 
+def _trusted_proxy_hosts() -> list[str] | str:
+    raw = os.getenv("MANAGEMENT_TRUSTED_PROXIES")
+    if not raw:
+        return "*"
+    hosts = [item.strip() for item in raw.split(",") if item.strip()]
+    return hosts or "*"
+
+
 def create_app(
     *,
     database: Database | None = None,
@@ -213,6 +222,7 @@ def create_app(
         description="Secure API for managing remote QEMU hypervisors over SSH",
         version="2.0.0",
     )
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_hosts())
 
     def get_db() -> Database:
         return database

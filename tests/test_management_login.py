@@ -140,3 +140,47 @@ def test_account_api_key_reveal_requires_password(tmp_path):
         assert revealed.status_code == 200
         assert api_key in revealed.text
         assert "Full API key" in revealed.text
+
+
+def test_account_api_key_rotation_uses_management_endpoint(tmp_path):
+    database = Database(tmp_path / "management.sqlite3")
+    database.initialize()
+    user, original_key = database.create_user("Rotate User", EMAIL, PASSWORD)
+
+    app = create_app(
+        database=database,
+        session_secret="not-so-secret",
+        api_base_url="https://example.com",
+    )
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/login",
+            data={"email": EMAIL, "password": PASSWORD},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+
+        account = client.get("/account")
+        assert account.status_code == 200
+        assert "http://testserver/account/api-key/rotate" in account.text
+
+        rotation = client.post(
+            "/account/api-key/rotate",
+            follow_redirects=False,
+        )
+        assert rotation.status_code == 303
+        assert rotation.headers["location"].endswith("/account")
+
+        refreshed = client.get("/account")
+        assert refreshed.status_code == 200
+
+        match = re.search(
+            r"Full API key:</strong></p>\s*<pre><code>([^<]+)</code></pre>",
+            refreshed.text,
+        )
+        assert match is not None
+        rotated_key = match.group(1).strip()
+        assert rotated_key
+        assert rotated_key != original_key
+        assert database.get_user_api_key(user.id) == rotated_key

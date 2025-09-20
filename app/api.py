@@ -277,7 +277,11 @@ def create_app(
             authorized_keys=[key_pair.public_key],
         )
 
-    @app.post("/users/me/api-key/rotate", response_model=RotateAPIKeyResponse)
+    @app.post(
+        "/users/me/api-key/rotate",
+        response_model=RotateAPIKeyResponse,
+        name="api_rotate_api_key",
+    )
     async def rotate_api_key(current_user: User = Depends(get_current_user), db: Database = Depends(get_db)) -> RotateAPIKeyResponse:
         refreshed, api_key = db.rotate_api_key(current_user.id)
         return RotateAPIKeyResponse(api_key=api_key, api_key_prefix=refreshed.api_key_prefix)

@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+from starlette.websockets import WebSocketState
 
 from .agent_registration import (
     AgentProvisioningError,
@@ -20,7 +22,15 @@ from .database import Database, resolve_database_path
 from .models import Agent, User
 from .qemu import QEMUError, QEMUManager
 from .security import APIKeyAuth
-from .ssh import CommandResult, SSHClientFactory, SSHCommandRunner, SSHTarget, SSHError
+from .ssh import (
+    CommandResult,
+    HostKeyVerificationError,
+    SSHClientFactory,
+    SSHCommandRunner,
+    SSHTarget,
+    SSHError,
+)
+from .terminals import send_websocket_json, stream_ssh_channel
 
 
 class UserResponse(BaseModel):
@@ -263,6 +273,32 @@ def create_app(
         version="2.0.0",
     )
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_hosts())
+    app.state.database = database
+
+    def _authenticate_websocket(websocket: WebSocket) -> tuple[User | None, int | None]:
+        header = websocket.headers.get("authorization")
+        if not header:
+            return None, 4401
+        parts = header.strip().split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return None, 4401
+        token = parts[1].strip()
+        if not token:
+            return None, 4401
+        user = database.get_user_by_api_key(token)
+        if user is None:
+            return None, 4403
+        return user, None
+
+    def _build_ssh_terminal(agent: Agent):
+        override = getattr(app.state, "ssh_terminal_factory", None)
+        if callable(override):
+            terminal = override(agent)
+            if terminal is None:
+                raise RuntimeError("SSH terminal override must return a context manager")
+            return terminal
+        factory = SSHClientFactory(agent_to_target(agent))
+        return factory.open_shell()
 
     def get_db() -> Database:
         return database
@@ -559,6 +595,53 @@ def create_app(
     async def reboot_vm(vm_name: str, manager: QEMUManager = Depends(get_qemu_manager)) -> Dict[str, object]:
         result = manager.reboot_vm(vm_name)
         return command_result_to_dict(result)
+
+    @app.websocket("/agents/{agent_id}/terminal")
+    async def agent_terminal(websocket: WebSocket, agent_id: int):
+        user, error_code = _authenticate_websocket(websocket)
+        if user is None:
+            await websocket.close(code=error_code or 4401)
+            return
+
+        agent = database.get_agent_for_user(user.id, agent_id)
+        if agent is None:
+            await websocket.close(code=4404)
+            return
+
+        await websocket.accept()
+
+        try:
+            with _build_ssh_terminal(agent) as channel:
+                await send_websocket_json(
+                    websocket,
+                    {"type": "status", "status": "connected"},
+                )
+                await stream_ssh_channel(websocket, channel)
+        except HostKeyVerificationError as exc:
+            await send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "code": "host_key_verification_failed",
+                },
+            )
+        except (SSHError, RuntimeError) as exc:
+            await send_websocket_json(
+                websocket, {"type": "error", "message": str(exc)}
+            )
+        except Exception:
+            await send_websocket_json(
+                websocket,
+                {
+                    "type": "error",
+                    "message": "SSH session terminated unexpectedly.",
+                },
+            )
+        finally:
+            if websocket.client_state != WebSocketState.DISCONNECTED:
+                with suppress(Exception):
+                    await websocket.close()
 
     app.include_router(protected_router)
 

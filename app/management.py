@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import anyio
-from fastapi import FastAPI, Form, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Form, Request, WebSocket, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -37,6 +37,7 @@ from .ssh import (
     SSHTarget,
     SSHError,
 )
+from .terminals import send_websocket_json, stream_ssh_channel
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -674,112 +675,6 @@ def create_app(
             content={"status": "error", "message": "Hypervisor not found."},
         )
 
-    async def _send_websocket_json(websocket: WebSocket, payload: Dict[str, object]) -> None:
-        if websocket.client_state == WebSocketState.DISCONNECTED:
-            return
-        with suppress(Exception):
-            await websocket.send_json(payload)
-
-    async def _stream_ssh_channel(websocket: WebSocket, channel, *, on_close=None) -> None:
-        cancel_exc = anyio.get_cancelled_exc_class()
-        closed = False
-
-        async def cleanup() -> None:
-            nonlocal closed
-            if closed:
-                return
-            closed = True
-            if on_close is not None:
-                try:
-                    result = on_close()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception:
-                    pass
-            with suppress(Exception):
-                await anyio.to_thread.run_sync(channel.close)
-            with suppress(Exception):
-                if websocket.application_state != WebSocketState.DISCONNECTED:
-                    await websocket.close()
-
-        async def pump_ssh_to_websocket(task_group) -> None:
-            try:
-                while True:
-                    data = await anyio.to_thread.run_sync(
-                        channel.recv,
-                        4096,
-                        abandon_on_cancel=True,
-                    )
-                    if not data:
-                        break
-                    try:
-                        await websocket.send_bytes(data)
-                    except Exception:
-                        break
-            except cancel_exc:
-                pass
-            except Exception:
-                pass
-            finally:
-                task_group.cancel_scope.cancel()
-                await cleanup()
-
-        async def pump_websocket_to_ssh(task_group) -> None:
-            try:
-                while True:
-                    message = await websocket.receive()
-                    if message["type"] == "websocket.disconnect":
-                        break
-                    data = message.get("bytes")
-                    if data is not None:
-                        if data:
-                            with suppress(Exception):
-                                await anyio.to_thread.run_sync(channel.send, data)
-                        continue
-                    text = message.get("text")
-                    if text is None:
-                        continue
-                    try:
-                        payload = json.loads(text)
-                    except json.JSONDecodeError:
-                        encoded = text.encode("utf-8", errors="ignore")
-                        if encoded:
-                            with suppress(Exception):
-                                await anyio.to_thread.run_sync(channel.send, encoded)
-                        continue
-                    message_type = payload.get("type")
-                    if message_type == "resize":
-                        cols = payload.get("cols")
-                        rows = payload.get("rows")
-                        try:
-                            width = int(cols) if cols else 0
-                        except (TypeError, ValueError):
-                            width = 0
-                        try:
-                            height = int(rows) if rows else 0
-                        except (TypeError, ValueError):
-                            height = 0
-                        width = width if width > 0 else 80
-                        height = height if height > 0 else 24
-                        with suppress(Exception):
-                            await anyio.to_thread.run_sync(channel.resize_pty, width, height)
-                        continue
-                    if message_type == "close":
-                        break
-            except (WebSocketDisconnect, cancel_exc):
-                pass
-            except Exception:
-                pass
-            finally:
-                task_group.cancel_scope.cancel()
-                await cleanup()
-
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(pump_ssh_to_websocket, task_group)
-            task_group.start_soon(pump_websocket_to_ssh, task_group)
-
-        await cleanup()
-
     @app.get("/management/agents/{agent_id}/vms")
     async def management_list_vms(request: Request, agent_id: int):
         user = _get_current_user(request)
@@ -1164,13 +1059,13 @@ def create_app(
 
         try:
             with _build_ssh_terminal(agent) as channel:
-                await _send_websocket_json(
+                await send_websocket_json(
                     websocket,
                     {"type": "status", "status": "connected"},
                 )
-                await _stream_ssh_channel(websocket, channel)
+                await stream_ssh_channel(websocket, channel)
         except HostKeyVerificationError as exc:
-            await _send_websocket_json(
+            await send_websocket_json(
                 websocket,
                 {
                     "type": "error",
@@ -1179,9 +1074,9 @@ def create_app(
                 },
             )
         except (SSHError, RuntimeError) as exc:
-            await _send_websocket_json(websocket, {"type": "error", "message": str(exc)})
+            await send_websocket_json(websocket, {"type": "error", "message": str(exc)})
         except Exception:
-            await _send_websocket_json(
+            await send_websocket_json(
                 websocket,
                 {
                     "type": "error",
@@ -1225,13 +1120,13 @@ def create_app(
                         await anyio.to_thread.run_sync(channel.send, b"\x1d\n")
                         await anyio.to_thread.run_sync(channel.send, b"exit\n")
 
-                await _send_websocket_json(
+                await send_websocket_json(
                     websocket,
                     {"type": "status", "status": "connected", "vm": cleaned_vm_name},
                 )
-                await _stream_ssh_channel(websocket, channel, on_close=detach_console)
+                await stream_ssh_channel(websocket, channel, on_close=detach_console)
         except HostKeyVerificationError as exc:
-            await _send_websocket_json(
+            await send_websocket_json(
                 websocket,
                 {
                     "type": "error",
@@ -1240,11 +1135,11 @@ def create_app(
                 },
             )
         except (SSHError, RuntimeError) as exc:
-            await _send_websocket_json(
+            await send_websocket_json(
                 websocket, {"type": "error", "message": str(exc)}
             )
         except Exception:
-            await _send_websocket_json(
+            await send_websocket_json(
                 websocket,
                 {
                     "type": "error",

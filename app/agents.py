@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Dict, Iterable, Mapping
+from typing import Dict, Iterable, List, Mapping
 
 DEFAULT_TUNNEL_HOST = "manage.playrservers.com"
 DEFAULT_TUNNEL_PORT = 443
@@ -335,6 +335,18 @@ class AgentRegistry:
                 raise PermissionError("Agent is owned by a different user")
             return session
 
+    async def list_sessions(self, *, user_id: int) -> List[AgentSession]:
+        """Return snapshots of all sessions owned by ``user_id``."""
+
+        async with self._lock:
+            self._prune_expired_locked()
+            sessions = [
+                self._clone_session(session)
+                for session in self._sessions.values()
+                if session.user_id == user_id
+            ]
+        return sessions
+
     def _ensure_session_is_valid(
         self,
         session: AgentSession,
@@ -377,6 +389,23 @@ class AgentRegistry:
         ]
         for agent_id in expired:
             self._sessions.pop(agent_id, None)
+
+    def _clone_session(self, session: AgentSession) -> AgentSession:
+        return AgentSession(
+            agent_id=session.agent_id,
+            user_id=session.user_id,
+            hostname=session.hostname,
+            capabilities=session.capabilities,
+            metadata=dict(session.metadata),
+            session_id=session.session_id,
+            token=session.token,
+            created_at=session.created_at,
+            last_seen=session.last_seen,
+            tunnels={
+                tunnel_id: replace(tunnel, metadata=dict(tunnel.metadata))
+                for tunnel_id, tunnel in session.tunnels.items()
+            },
+        )
 
 
 __all__ = [

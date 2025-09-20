@@ -161,6 +161,39 @@ class ManagementServiceTests(unittest.TestCase):
             payload = connect.json()
             self.assertEqual(payload["tunnel_endpoint"], {"host": "staging.playrservers.com", "port": 8443})
 
+    def test_agent_listing_endpoint_returns_active_sessions(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        with TestClient(app) as client:
+            empty = client.get("/v1/agents", auth=self._auth())
+            self.assertEqual(empty.status_code, 200, empty.text)
+            empty_payload = empty.json()
+            self.assertEqual(empty_payload, {"agents": []})
+
+            connect = client.post(
+                "/v1/agents/connect",
+                auth=self._auth(),
+                json={"agent_id": "agent-list", "hostname": "hypervisor-list"},
+            )
+            self.assertEqual(connect.status_code, 200, connect.text)
+            session_id = connect.json()["session_id"]
+            agent_token = connect.json()["agent_token"]
+
+            client.post(
+                "/v1/agents/agent-list/heartbeat",
+                auth=self._auth(),
+                json={"session_id": session_id, "agent_token": agent_token},
+            )
+
+            listing = client.get("/v1/agents", auth=self._auth())
+            self.assertEqual(listing.status_code, 200, listing.text)
+            payload = listing.json()
+            self.assertEqual(len(payload["agents"]), 1)
+            agent_info = payload["agents"][0]
+            self.assertEqual(agent_info["agent_id"], "agent-list")
+            self.assertEqual(agent_info["hostname"], "hypervisor-list")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

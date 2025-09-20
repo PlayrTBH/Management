@@ -1,75 +1,20 @@
-"""Domain models for the management service."""
+"""Domain models retained for the pared-down management service."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Optional
 
 
 @dataclass(frozen=True)
 class User:
-    """Represents an authenticated user of the management service."""
+    """Represents a user account stored in the management database."""
 
     id: int
     name: str
     email: Optional[str]
-    api_key_prefix: str
     created_at: datetime
 
 
-@dataclass(frozen=True)
-class Agent:
-    """Represents a remote virtualization agent owned by a user."""
-
-    id: int
-    user_id: int
-    name: str
-    hostname: str
-    port: int
-    username: str
-    private_key: str
-    private_key_passphrase: Optional[str]
-    allow_unknown_hosts: bool
-    known_hosts_path: Optional[str]
-    created_at: datetime
-
-
-@dataclass(frozen=True)
-class AgentCommand:
-    """Represents a queued command awaiting execution by an agent."""
-
-    id: int
-    user_id: int
-    command: str
-    created_at: datetime
-    dispatched_at: Optional[datetime]
-
-
-@dataclass(frozen=True)
-class AgentCommandReply:
-    """Stores data returned by an agent after executing a command."""
-
-    id: int
-    user_id: int
-    command_id: int
-    data: Dict[str, object]
-    created_at: datetime
-    acknowledged_at: Optional[datetime]
-
-
-@dataclass(frozen=True)
-class ProvisioningKeyPair:
-    """Stores SSH key material generated for a user profile."""
-
-    user_id: int
-    private_key: str
-    public_key: str
-    created_at: datetime
-
-__all__ = [
-    "Agent",
-    "AgentCommand",
-    "AgentCommandReply",
-    "ProvisioningKeyPair",
-    "User",
-]
+__all__ = ["User"]

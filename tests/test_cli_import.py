@@ -1,4 +1,4 @@
-"""Regression tests for CLI imports without the FastAPI dependency."""
+"""Regression tests for importing the data layer without optional dependencies."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ class CLIImportTests(unittest.TestCase):
         for name in [m for m in list(sys.modules.keys()) if m == "app" or m.startswith("app.")]:
             sys.modules.pop(name, None)
 
-    def test_import_database_without_fastapi(self) -> None:
-        """Importing app.database should succeed even if FastAPI is unavailable."""
+    def test_import_database_without_optional_packages(self) -> None:
+        """Importing app.database should succeed even if extras like passlib are missing."""
 
         self._clear_app_modules()
 
@@ -36,8 +36,7 @@ class CLIImportTests(unittest.TestCase):
 
             app_module = sys.modules.get("app")
             self.assertIsNotNone(app_module)
-            self.assertTrue(hasattr(app_module, "create_application"))
-            self.assertIsNone(getattr(app_module, "app"))
+            self.assertTrue(hasattr(app_module, "Database"))
         finally:
             sys.modules.pop("fastapi", None)
             if fastapi_module is not None:

@@ -12,6 +12,7 @@ from scripts.install_service import (
     UserInputError,
     create_initial_user,
     prompt_for_non_empty,
+    _interactive_prompt_io,
 )
 
 
@@ -106,3 +107,24 @@ def test_prompt_for_non_empty_eof(monkeypatch):
 
     with pytest.raises(UserInputError):
         prompt_for_non_empty("Display name: ")
+
+
+def test_interactive_prompt_io_falls_back_to_standard_streams(monkeypatch):
+
+    class FakeStream(io.StringIO):
+        def isatty(self):
+            return False
+
+    fake_stdin = FakeStream()
+    fake_stdout = FakeStream()
+
+    def fake_open(*_args, **_kwargs):  # pragma: no cover - simple fallback path
+        raise OSError("no controlling terminal")
+
+    monkeypatch.setattr("scripts.install_service.sys.stdin", fake_stdin)
+    monkeypatch.setattr("scripts.install_service.sys.stdout", fake_stdout)
+    monkeypatch.setattr("scripts.install_service.open", fake_open, raising=False)
+
+    with _interactive_prompt_io() as (stdin, stdout):
+        assert stdin is fake_stdin
+        assert stdout is fake_stdout

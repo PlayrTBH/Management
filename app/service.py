@@ -124,6 +124,10 @@ class AgentStatusResponse(BaseModel):
     tunnels: List[TunnelView]
 
 
+class AgentListResponse(BaseModel):
+    agents: List[AgentStatusResponse]
+
+
 def _tunnel_to_view(tunnel: Tunnel, registry: AgentRegistry) -> TunnelView:
     return TunnelView(
         tunnel_id=tunnel.id,
@@ -378,6 +382,13 @@ def create_app(
         except KeyError:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
         return _session_to_status(session, app_registry)
+
+    @app.get("/v1/agents", response_model=AgentListResponse)
+    async def list_agents(user: User = Depends(current_user)) -> AgentListResponse:
+        sessions = await app_registry.list_sessions(user_id=user.id)
+        return AgentListResponse(
+            agents=[_session_to_status(session, app_registry) for session in sessions]
+        )
 
     @app.get("/v1/agents/{agent_id}/tunnels", response_model=TunnelListResponse)
     async def list_tunnels(agent_id: str, user: User = Depends(current_user)) -> TunnelListResponse:

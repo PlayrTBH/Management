@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 try:  # pragma: no cover - exercised indirectly via tests
     from passlib.context import CryptContext
@@ -180,6 +180,13 @@ class Database:
         if row is None:
             return None
         return self._row_to_user(row)
+
+    def list_users(self) -> List[User]:
+        """Return all known user accounts ordered by creation."""
+
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM users ORDER BY id ASC").fetchall()
+        return [self._row_to_user(row) for row in rows]
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:
         with self._connect() as conn:

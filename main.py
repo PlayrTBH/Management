@@ -1,17 +1,57 @@
 """Command-line interface for the PlayrServers management service."""
 
 from __future__ import annotations
-
 import argparse
 import logging
 import os
 import subprocess
+import sys
 from collections import deque
 from getpass import getpass
 from pathlib import Path
 from typing import Sequence
 
-import httpx
+
+def _running_in_virtualenv() -> bool:
+    """Return ``True`` when the current interpreter is executing inside a venv."""
+
+    base_prefix = getattr(sys, "base_prefix", sys.prefix)
+    return sys.prefix != base_prefix
+
+
+def _bootstrap_virtualenv() -> None:
+    """Re-exec the script using the bundled virtualenv interpreter when available."""
+
+    if _running_in_virtualenv():
+        return
+
+    root = Path(__file__).resolve().parent
+    venv_dir = root / ".venv"
+    if not venv_dir.is_dir():
+        return
+
+    candidates = (
+        venv_dir / "bin" / "python",
+        venv_dir / "bin" / "python3",
+        venv_dir / "Scripts" / "python.exe",
+        venv_dir / "Scripts" / "python",
+    )
+
+    script = str(Path(__file__).resolve())
+    for candidate in candidates:
+        if candidate.exists():
+            os.execv(str(candidate), [str(candidate), script, *sys.argv[1:]])
+
+
+_bootstrap_virtualenv()
+
+try:
+    import httpx
+except ImportError as exc:  # pragma: no cover - exercised in environments missing deps
+    raise SystemExit(
+        "The 'httpx' package is required. Re-run scripts/install_service.py or "
+        "execute `pip install -r requirements.txt` to install dependencies."
+    ) from exc
 
 from app.database import Database, resolve_database_path
 

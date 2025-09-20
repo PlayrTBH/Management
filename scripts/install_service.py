@@ -19,6 +19,10 @@ if str(ROOT) not in sys.path:
 from app.database import Database, resolve_database_path
 
 
+class UserInputError(RuntimeError):
+    """Raised when the installer cannot obtain interactive user input."""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Install and bootstrap the management service")
     parser.add_argument(
@@ -92,7 +96,12 @@ def initialise_database(db_path_arg: str | None) -> tuple[Database, Path]:
 
 def prompt_for_non_empty(prompt: str) -> str:
     while True:
-        value = input(prompt).strip()
+        try:
+            value = input(prompt)
+        except EOFError as exc:
+            raise UserInputError("Input stream closed while waiting for a response.") from exc
+
+        value = value.strip()
         if value:
             return value
         print("Value must not be empty. Please try again.")
@@ -100,8 +109,11 @@ def prompt_for_non_empty(prompt: str) -> str:
 
 def prompt_for_password() -> str:
     while True:
-        password = getpass.getpass("Password (minimum 12 characters): ")
-        confirm = getpass.getpass("Confirm password: ")
+        try:
+            password = getpass.getpass("Password (minimum 12 characters): ")
+            confirm = getpass.getpass("Confirm password: ")
+        except EOFError as exc:
+            raise UserInputError("Input stream closed while reading the password.") from exc
         if password != confirm:
             print("Passwords do not match. Please try again.")
             continue
@@ -163,6 +175,11 @@ def create_initial_user(
         return
 
     print("\nNo users were found in the database. Let's create the first account.")
+    if not sys.stdin.isatty():
+        raise UserInputError(
+            "Unable to prompt for initial user details because standard input is not interactive. "
+            "Re-run the installer with --admin-name, --admin-email, and --admin-password.",
+        )
     while True:
         name = prompt_for_non_empty("Display name: ")
         email = prompt_for_non_empty("Email address (used for login): ").lower()
@@ -206,6 +223,9 @@ def main() -> int:
         print(f"Command failed with exit code {exc.returncode}: {cmd_display}", file=sys.stderr)
         return exc.returncode or 1
     except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except UserInputError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:

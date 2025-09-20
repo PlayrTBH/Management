@@ -11,6 +11,7 @@ from app.database import Database
 from scripts.install_service import (
     UserInputError,
     create_initial_user,
+    ensure_required_packages_installed,
     prompt_for_non_empty,
     _interactive_prompt_io,
 )
@@ -128,3 +129,35 @@ def test_interactive_prompt_io_falls_back_to_standard_streams(monkeypatch):
     with _interactive_prompt_io() as (stdin, stdout):
         assert stdin is fake_stdin
         assert stdout is fake_stdout
+
+
+def test_ensure_required_packages_installed_success(monkeypatch):
+
+    imported = []
+
+    def fake_import(name):
+        imported.append(name)
+        return object()
+
+    monkeypatch.setattr("scripts.install_service.importlib.import_module", fake_import)
+
+    ensure_required_packages_installed(["fastapi", "uvicorn"])
+    assert imported == ["fastapi", "uvicorn"]
+
+
+def test_ensure_required_packages_installed_missing(monkeypatch):
+
+    def fake_import(name):
+        if name == "uvicorn":
+            raise ImportError("No module named 'uvicorn'")
+        return object()
+
+    monkeypatch.setattr("scripts.install_service.importlib.import_module", fake_import)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_required_packages_installed(["fastapi", "uvicorn", "httpx"])
+
+    message = str(excinfo.value)
+    assert "uvicorn" in message
+    # Ensure the error lists every missing dependency only once
+    assert message.count("uvicorn") == 1

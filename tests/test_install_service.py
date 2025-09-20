@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from app.database import Database
-from scripts.install_service import create_initial_user
+from scripts.install_service import (
+    UserInputError,
+    create_initial_user,
+    prompt_for_non_empty,
+)
 
 
 def _initialised_database(tmp_path):
@@ -51,3 +55,19 @@ def test_create_initial_user_cli_short_password(tmp_path):
             admin_email="admin@example.com",
             admin_password="short",
         )
+
+
+def test_create_initial_user_requires_interactive_stdin(tmp_path, monkeypatch):
+    database = _initialised_database(tmp_path)
+
+    monkeypatch.setattr("scripts.install_service.sys.stdin.isatty", lambda: False)
+
+    with pytest.raises(UserInputError):
+        create_initial_user(database)
+
+
+def test_prompt_for_non_empty_eof(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: (_ for _ in ()).throw(EOFError()))
+
+    with pytest.raises(UserInputError):
+        prompt_for_non_empty("Display name: ")

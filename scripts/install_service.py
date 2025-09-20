@@ -6,12 +6,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import getpass
+import importlib
 import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Iterable, Sequence, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -72,6 +73,9 @@ def run_command(command: Sequence[str]) -> None:
     subprocess.check_call(command)
 
 
+REQUIRED_PACKAGES: tuple[str, ...] = ("fastapi", "uvicorn", "httpx")
+
+
 def install_dependencies(extra_args: Sequence[str]) -> None:
     requirements = ROOT / "requirements.txt"
     if not requirements.exists():
@@ -84,6 +88,28 @@ def install_dependencies(extra_args: Sequence[str]) -> None:
 
     print("Installing Python dependencies...")
     run_command(command)
+
+
+def ensure_required_packages_installed(
+    packages: Iterable[str] = REQUIRED_PACKAGES,
+) -> None:
+    """Verify that critical runtime dependencies can be imported."""
+
+    missing: list[str] = []
+    for module_name in packages:
+        try:
+            importlib.import_module(module_name)
+        except ImportError:
+            missing.append(module_name)
+
+    if missing:
+        requirement_hint = ROOT / "requirements.txt"
+        names = ", ".join(sorted(missing))
+        raise RuntimeError(
+            "Missing required Python packages: "
+            f"{names}. Re-run the installer or execute "
+            f"`{sys.executable} -m pip install -r {requirement_hint}`."
+        )
 
 
 def initialise_database(db_path_arg: str | None) -> tuple[Database, Path]:
@@ -333,6 +359,7 @@ def main() -> int:
     try:
         if not args.skip_deps:
             install_dependencies(pip_args)
+            ensure_required_packages_installed()
         database, db_path = initialise_database(args.db_path)
         create_initial_user(
             database,

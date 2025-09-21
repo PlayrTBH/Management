@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title %}{{ hypervisor.agent_id }} · Hypervisor · PlayrServers Management{% endblock %}
+
+{% block content %}
+<div id="hypervisor-detail" data-agent="{{ hypervisor.agent_id }}">
+  <header class="page-head">
+    <div class="page-head__content">
+      <h1 class="page-head__title">{{ hypervisor.agent_id }}</h1>
+      <p class="page-head__subtitle">Orchestrate {{ hypervisor.hostname }} and the virtual machines provisioned on this hypervisor.</p>
+      <div class="badge-group">
+        <span class="status-pill{% if hypervisor.is_online %} status-pill--success{% else %} status-pill--muted{% endif %}">{{ 'Online' if hypervisor.is_online else 'Offline' }}</span>
+        <span class="badge badge--accent">Endpoint {{ hypervisor.endpoint_host }}:{{ hypervisor.endpoint_port }}</span>
+        {% for capability in hypervisor.capabilities %}
+        <span class="badge">{{ capability }}</span>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="page-head__actions">
+      <a class="button button--primary" href="{{ request.url_for('ui_dashboard') }}">Back to dashboard</a>
+    </div>
+  </header>
+
+  <section class="card">
+    <h2 class="card__title">Host overview</h2>
+    <p class="card__subtitle">System information reported by the connected agent.</p>
+    <dl class="detail-grid">
+      {% for label, value in host_overview %}
+      <div class="detail-grid__item">
+        <dt>{{ label }}</dt>
+        <dd>{{ value }}</dd>
+      </div>
+      {% endfor %}
+    </dl>
+  </section>
+
+  <section class="card">
+    <h2 class="card__title">Performance metrics</h2>
+    <p class="card__subtitle">Live CPU utilisation for each physical core.</p>
+    {% if cpu_metrics %}
+    <ul class="metric-list">
+      {% for core in cpu_metrics %}
+      <li class="metric-list__item">
+        <span class="metric-list__label">{{ core.label }}</span>
+        <div class="metric-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ '%.1f'|format(core.usage) }}">
+          <div class="metric-bar__fill" style="width: {{ '%.2f'|format(core.usage) }}%;"></div>
+        </div>
+        <span class="metric-list__value{% if core.usage >= 85 %} metric-list__value--high{% elif core.usage <= 20 %} metric-list__value--healthy{% endif %}">{{ '%.1f'|format(core.usage) }}%</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-muted">No per-core metrics have been reported yet. Ensure the agent is publishing performance data.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2 class="card__title">Virtual machines</h2>
+    <p class="card__subtitle">Review guests hosted on this hypervisor and queue management actions.</p>
+    {% if virtual_machines %}
+    <div class="table" data-vm-table data-agent="{{ hypervisor.agent_id }}">
+      <div class="table__header">
+        <span>Name</span>
+        <span>Status</span>
+        <span>Power</span>
+        <span>CPU</span>
+        <span>Memory</span>
+        <span>Actions</span>
+      </div>
+      {% for vm in virtual_machines %}
+      <div class="table__row" data-vm-id="{{ vm.id }}">
+        <span class="table__cell table__cell--emphasis">{{ vm.name }}</span>
+        <span class="table__cell">{{ vm.status or 'Unknown' }}</span>
+        <span class="table__cell">{{ vm.power_state or 'Unknown' }}</span>
+        <span class="table__cell">{{ vm.cpu or '—' }}</span>
+        <span class="table__cell">{{ vm.memory or '—' }}</span>
+        <span class="table__cell">
+          <div class="vm-actions">
+            <button type="button" class="button" data-action="start">Start</button>
+            <button type="button" class="button" data-action="stop">Stop</button>
+            <button type="button" class="button" data-action="restart">Restart</button>
+            <button type="button" class="button" data-action="force-stop">Force stop</button>
+            <button type="button" class="button" data-action="console">Virtual console</button>
+          </div>
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="text-muted" data-vm-status>Queued actions will be delivered through the secure management tunnel.</p>
+    {% else %}
+    <div class="empty-state">
+      <h2>No virtual machines reported</h2>
+      <p>The agent has not published an inventory yet. It will appear here once available.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2 class="card__title">SSH terminal</h2>
+    <p class="card__subtitle">Request an ephemeral tunnel through the management plane to open a secure shell without exposing additional ports.</p>
+    <div class="ssh-terminal" data-agent="{{ hypervisor.agent_id }}">
+      <div class="ssh-terminal__actions">
+        <button type="button" class="button" data-ssh-launch>Launch terminal</button>
+        <button type="button" class="button" data-ssh-copy disabled>Copy command</button>
+      </div>
+      <pre class="ssh-terminal__output" data-ssh-output>Click “Launch terminal” to request a secure tunnel.</pre>
+      <div class="ssh-terminal__status" data-ssh-status>Ready.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const container = document.getElementById('hypervisor-detail');
+    if (!container) {
+      return;
+    }
+    const agentId = container.dataset.agent;
+
+    const vmTable = container.querySelector('[data-vm-table]');
+    const vmStatus = container.querySelector('[data-vm-status]');
+    if (vmTable) {
+      vmTable.addEventListener('click', async (event) => {
+        const button = event.target.closest('button[data-action]');
+        if (!button) {
+          return;
+        }
+        const row = button.closest('[data-vm-id]');
+        if (!row) {
+          return;
+        }
+        const vmId = row.dataset.vmId;
+        const action = button.dataset.action;
+        const originalLabel = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Processing…';
+        try {
+          const response = await fetch(`/hypervisors/${encodeURIComponent(agentId)}/vms/${encodeURIComponent(vmId)}/${encodeURIComponent(action)}`, {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'fetch'
+            },
+            body: JSON.stringify({})
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(payload.detail || 'Unable to queue action.');
+          }
+          if (vmStatus) {
+            vmStatus.textContent = payload.message || `Queued ${payload.action || action} for ${payload.vm || vmId}.`;
+          }
+        } catch (error) {
+          if (vmStatus) {
+            vmStatus.textContent = error.message || 'Action failed. Check the hypervisor connection.';
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = originalLabel;
+        }
+      });
+    }
+
+    const sshPanel = container.querySelector('.ssh-terminal');
+    if (!sshPanel) {
+      return;
+    }
+    const launchButton = sshPanel.querySelector('[data-ssh-launch]');
+    const copyButton = sshPanel.querySelector('[data-ssh-copy]');
+    const output = sshPanel.querySelector('[data-ssh-output]');
+    const status = sshPanel.querySelector('[data-ssh-status]');
+    let lastCommand = '';
+
+    if (launchButton) {
+      launchButton.addEventListener('click', async () => {
+        launchButton.disabled = true;
+        if (status) {
+          status.textContent = 'Requesting tunnel…';
+        }
+        try {
+          const response = await fetch(`/hypervisors/${encodeURIComponent(agentId)}/terminal`, {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'X-Requested-With': 'fetch'
+            }
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(payload.detail || 'Unable to create tunnel.');
+          }
+          lastCommand = payload.ssh_command || '';
+          if (output) {
+            if (lastCommand) {
+              output.textContent = payload.ssh_command;
+            } else if (payload.command) {
+              lastCommand = payload.command;
+              output.textContent = payload.command;
+            } else {
+              output.textContent = 'Tunnel ready. Use your preferred SSH client with the returned credentials.';
+            }
+          }
+          if (copyButton) {
+            copyButton.disabled = !lastCommand;
+          }
+          if (status) {
+            status.textContent = payload.message || `Tunnel ${payload.tunnel_id} established on port ${payload.remote_port}.`;
+          }
+        } catch (error) {
+          if (status) {
+            status.textContent = error.message || 'Unable to request tunnel. Ensure the hypervisor is online.';
+          }
+        } finally {
+          launchButton.disabled = false;
+        }
+      });
+    }
+
+    if (copyButton) {
+      copyButton.addEventListener('click', async () => {
+        if (!lastCommand) {
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(lastCommand);
+          if (status) {
+            status.textContent = 'Copied SSH command to the clipboard.';
+          }
+        } catch (error) {
+          if (status) {
+            status.textContent = 'Copy failed. Please select the command manually.';
+          }
+        }
+      });
+    }
+  });
+</script>
+{% endblock %}

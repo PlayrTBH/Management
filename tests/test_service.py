@@ -281,6 +281,20 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertEqual(redirected.status_code, 303)
             self.assertTrue(redirected.headers["location"].endswith("/login"))
 
+    def test_root_package_create_app_includes_api_and_web(self) -> None:
+        from app import create_app as root_create_app
+
+        registry = AgentRegistry()
+        app = root_create_app(database=self.database, registry=registry)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            health = client.get("/healthz")
+            self.assertEqual(health.status_code, 200, health.text)
+
+            landing = client.get("/")
+            self.assertEqual(landing.status_code, 200, landing.text)
+            self.assertIn("Welcome back", landing.text)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -121,6 +121,13 @@ python main.py serve \
   --ssl-keyfile /etc/ssl/private/management.key
 ```
 
+When using `scripts/install.sh` or `scripts/install_service.py` without
+explicit TLS arguments the installer automatically provisions a self-signed
+certificate stored under `data/tls/`. The generated systemd unit references the
+certificate and key so the API is immediately reachable over HTTPS on port 443;
+replace the files with a certificate issued by a trusted authority for
+production deployments.
+
 With the service running you can sign in at `https://localhost/` (or the
 appropriate hostname) to access the new management dashboard. Sessions are
 kept in-memory on the server, so restarting the process will invalidate any

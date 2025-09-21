@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shlex
 import sys
 
 import pytest
@@ -198,13 +199,34 @@ def test_create_systemd_service_writes_unit(tmp_path, monkeypatch):
     )
 
     db_path = tmp_path / "management.sqlite3"
-    unit_path = create_systemd_service(db_path, service_dir=tmp_path)
+    cert_path = tmp_path / "management.crt"
+    key_path = tmp_path / "management.key"
+    cert_path.write_text("cert", encoding="utf-8")
+    key_path.write_text("key", encoding="utf-8")
+
+    unit_path = create_systemd_service(
+        db_path,
+        service_dir=tmp_path,
+        ssl_certfile=cert_path,
+        ssl_keyfile=key_path,
+    )
 
     assert unit_path == tmp_path / f"{SERVICE_NAME}.service"
     contents = unit_path.read_text(encoding="utf-8")
-    exec_line = (
-        f"ExecStart={sys.executable} {ROOT / 'main.py'} serve --host 0.0.0.0 --port 443"
-    )
+    exec_parts = [
+        sys.executable,
+        str(ROOT / "main.py"),
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "443",
+        "--ssl-certfile",
+        str(cert_path),
+        "--ssl-keyfile",
+        str(key_path),
+    ]
+    exec_line = f"ExecStart={shlex.join(exec_parts)}"
     assert exec_line in contents
     assert f"WorkingDirectory={ROOT}" in contents
     assert f"Environment=MANAGEMENT_DB_PATH={db_path}" in contents
@@ -225,7 +247,17 @@ def test_create_systemd_service_skips_systemctl_when_missing(tmp_path, monkeypat
     monkeypatch.setattr("scripts.install_service.run_command", fake_run)
     monkeypatch.setattr("scripts.install_service.shutil.which", lambda name: None)
 
-    unit_path = create_systemd_service(tmp_path / "db.sqlite3", service_dir=tmp_path)
+    cert_path = tmp_path / "cert.pem"
+    key_path = tmp_path / "key.pem"
+    cert_path.write_text("cert", encoding="utf-8")
+    key_path.write_text("key", encoding="utf-8")
+
+    unit_path = create_systemd_service(
+        tmp_path / "db.sqlite3",
+        service_dir=tmp_path,
+        ssl_certfile=cert_path,
+        ssl_keyfile=key_path,
+    )
 
     assert unit_path.exists()
     assert commands == []

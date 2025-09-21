@@ -491,7 +491,7 @@ write_service_unit() {
   local agent_home="$1"
   local config_file="$2"
   local unit_path="/etc/systemd/system/playr-agent.service"
-  cat <<'UNIT' > "${unit_path}"
+  cat <<UNIT > "${unit_path}"
 [Unit]
 Description=PlayrServers Hypervisor Agent
 After=network-online.target
@@ -502,7 +502,7 @@ Type=simple
 User=playr-agent
 Group=playr-agent
 Environment="PATH=${agent_home}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
-ExecStart=${agent_home}/venv/bin/python ${agent_home}/agent.py --config ${config_file}
+ExecStart="${agent_home}/venv/bin/python" "${agent_home}/agent.py" --config "${config_file}"
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:${DEFAULT_LOG_DIR}/agent.log

@@ -304,6 +304,9 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertNotIn("ssh_command", terminal_payload)
             self.assertEqual(terminal_payload["remote_port"], 2200)
             self.assertEqual(terminal_payload["local_port"], 22)
+            self.assertIn("endpoint", terminal_payload)
+            self.assertEqual(terminal_payload["endpoint"].get("host"), registry.tunnel_host)
+            self.assertEqual(terminal_payload["endpoint"].get("port"), registry.tunnel_port)
             self.assertIn("websocket_path", terminal_payload)
             self.assertTrue(
                 terminal_payload["websocket_path"].startswith("/hypervisors/agent-detail/terminal/ws")

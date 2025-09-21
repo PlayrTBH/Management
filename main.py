@@ -57,7 +57,7 @@ from app.database import Database, resolve_database_path
 
 logger = logging.getLogger("playrservers.main")
 
-_DEFAULT_SERVICE_URL = "https://localhost"
+_DEFAULT_SERVICE_URL = "https://localhost:8001"
 SYSTEMD_SERVICE_NAME = "playr-management"
 
 
@@ -74,8 +74,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     serve_parser.add_argument(
         "--port",
         type=int,
-        default=443,
-        help="Port for the HTTPS API (default: 443)",
+        default=8001,
+        help="Port for the HTTPS API (default: 8001)",
     )
     serve_parser.add_argument(
         "--tunnel-host",
@@ -110,7 +110,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     admin_parser.add_argument(
         "--service-url",
         default=None,
-        help="Base URL of a running management service (default: https://localhost)",
+        help="Base URL of a running management service (default: https://localhost:8001)",
     )
     admin_parser.add_argument(
         "--hypervisor-email",

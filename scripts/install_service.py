@@ -86,10 +86,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ssl-common-name",
         dest="ssl_common_name",
-        default="manage.playrservers.com",
+        default="api.playrservers.com",
         help=(
             "Common Name used when generating a self-signed TLS certificate. "
-            "Default: manage.playrservers.com"
+            "Default: api.playrservers.com"
         ),
     )
     return parser.parse_args()
@@ -224,7 +224,7 @@ def _render_systemd_unit(
         "--host",
         "0.0.0.0",
         "--port",
-        "443",
+        "8001",
         "--ssl-certfile",
         str(ssl_certfile),
         "--ssl-keyfile",
@@ -667,7 +667,7 @@ def main() -> int:
         "--host",
         "0.0.0.0",
         "--port",
-        "443",
+        "8001",
         "--ssl-certfile",
         str(cert_path),
         "--ssl-keyfile",

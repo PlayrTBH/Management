@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, Iterable, List, Mapping
 
-DEFAULT_TUNNEL_HOST = "manage.playrservers.com"
+DEFAULT_TUNNEL_HOST = "api.playrservers.com"
 DEFAULT_TUNNEL_PORT = 443
 DEFAULT_SESSION_TIMEOUT = timedelta(minutes=5)
 

@@ -38,7 +38,7 @@
   <ul class="list">
     <li>Required QEMU/KVM and libvirt packages for Ubuntu hosts.</li>
     <li>A dedicated <code>playr-agent</code> system user and Python virtual environment.</li>
-    <li>The PlayrServers agent service that maintains an encrypted tunnel to {{ request.url.hostname or 'manage.playrservers.com' }}.</li>
+    <li>The PlayrServers agent service that maintains an encrypted tunnel to {{ request.url.hostname or 'api.playrservers.com' }}.</li>
     <li>Automatic systemd integration so the agent starts on boot and restarts after failures.</li>
   </ul>
 </section>

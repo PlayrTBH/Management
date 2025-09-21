@@ -13,7 +13,7 @@ clean foundation.
   optional; the module provides a PBKDF2 fallback when they are absent.
 - ✅ **Agent coordination service** – `app.service.create_app()` exposes a
   FastAPI application that agents use to authenticate, maintain heartbeats, and
-  request encrypted tunnels that terminate on `manage.playrservers.com:443`.
+  request encrypted tunnels that terminate on `api.playrservers.com:443`.
 - ✅ **Secure web dashboard** – administrators can sign in at
   `https://<host>/` to review their account and view paired hypervisors.
 - ✅ **Command-line bootstrap** – `python main.py` initialises the database by
@@ -86,7 +86,7 @@ curl -fsSL https://<host>/agent | sudo bash -s -- --api-key psm_xxxxx --agent-id
 
 Agents authenticate back to the management plane using this API key, install
 their own systemd service, and maintain an encrypted reverse tunnel to
-`manage.playrservers.com` so the dashboard can expose web-based SSH sessions and
+`api.playrservers.com` so the dashboard can expose web-based SSH sessions and
 issue VM management commands.
 
 ### Manual setup
@@ -111,12 +111,12 @@ python scripts/create_user.py "Test User" test@example.com
 
 Launch the API using the same credentials you created above. Provide the path to
 your TLS certificate and private key so the management portal is available over
-HTTPS on port 443:
+HTTPS on port 8001:
 
 ```bash
 python main.py serve \
   --host 0.0.0.0 \
-  --port 443 \
+  --port 8001 \
   --ssl-certfile /etc/ssl/certs/management.crt \
   --ssl-keyfile /etc/ssl/private/management.key
 ```
@@ -124,11 +124,11 @@ python main.py serve \
 When using `scripts/install.sh` or `scripts/install_service.py` without
 explicit TLS arguments the installer automatically provisions a self-signed
 certificate stored under `data/tls/`. The generated systemd unit references the
-certificate and key so the API is immediately reachable over HTTPS on port 443;
+certificate and key so the API is immediately reachable over HTTPS on port 8001;
 replace the files with a certificate issued by a trusted authority for
 production deployments.
 
-With the service running you can sign in at `https://localhost/` (or the
+With the service running you can sign in at `https://localhost:8001/` (or the
 appropriate hostname) to access the new management dashboard. Sessions are
 kept in-memory on the server, so restarting the process will invalidate any
 active browser logins.
@@ -144,7 +144,7 @@ with the following key endpoints:
 - `POST /v1/agents/{agent_id}/tunnels/{tunnel_id}/close` – terminate a tunnel
 - `GET /v1/agents/{agent_id}` – retrieve detailed session and tunnel metadata
 
-The API always advertises the public endpoint `manage.playrservers.com:443` to
+The API always advertises the public endpoint `api.playrservers.com:443` to
 agents. Custom host/port values can be supplied at runtime using the
 `--tunnel-host` and `--tunnel-port` flags if you need to point at staging
 infrastructure.

@@ -179,7 +179,7 @@ main() {
 [playrservers] Installation complete.
 The service files are located at: ${INSTALL_DIR}
 To activate the environment, run: source "${VENV_DIR}/bin/activate"
-Start the API with: "${VENV_DIR}/bin/python" "${INSTALL_DIR}/main.py" serve --host 0.0.0.0 --port 443 --ssl-certfile "${INSTALL_DIR}/data/tls/management.crt" --ssl-keyfile "${INSTALL_DIR}/data/tls/management.key"
+Start the API with: "${VENV_DIR}/bin/python" "${INSTALL_DIR}/main.py" serve --host 0.0.0.0 --port 8001 --ssl-certfile "${INSTALL_DIR}/data/tls/management.crt" --ssl-keyfile "${INSTALL_DIR}/data/tls/management.key"
 TLS assets are stored under: ${INSTALL_DIR}/data/tls/
 EOM
 }

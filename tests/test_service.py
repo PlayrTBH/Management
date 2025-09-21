@@ -48,7 +48,7 @@ class ManagementServiceTests(unittest.TestCase):
             payload = connect.json()
             self.assertIn("session_id", payload)
             self.assertIn("agent_token", payload)
-            self.assertEqual(payload["tunnel_endpoint"], {"host": "manage.playrservers.com", "port": 443})
+            self.assertEqual(payload["tunnel_endpoint"], {"host": "api.playrservers.com", "port": 443})
 
             session_id = payload["session_id"]
             agent_token = payload["agent_token"]
@@ -77,7 +77,7 @@ class ManagementServiceTests(unittest.TestCase):
             )
             self.assertEqual(created.status_code, 201, created.text)
             tunnel_info = created.json()
-            self.assertEqual(tunnel_info["endpoint"], {"host": "manage.playrservers.com", "port": 443})
+            self.assertEqual(tunnel_info["endpoint"], {"host": "api.playrservers.com", "port": 443})
             tunnel_id = tunnel_info["tunnel_id"]
 
             status = client.get("/v1/agents/agent-01", auth=self._auth())

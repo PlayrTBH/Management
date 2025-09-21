@@ -220,7 +220,7 @@ def test_create_systemd_service_writes_unit(tmp_path, monkeypatch):
         "--host",
         "0.0.0.0",
         "--port",
-        "443",
+        "8001",
         "--ssl-certfile",
         str(cert_path),
         "--ssl-keyfile",

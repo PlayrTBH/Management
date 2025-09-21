@@ -115,6 +115,7 @@ REQUIRED_PACKAGES: tuple[PackageRequirement, ...] = (
     PackageRequirement("httpx", ("httpx",)),
     PackageRequirement("jinja2", ("jinja2",)),
     PackageRequirement("python-multipart", ("multipart",)),
+    PackageRequirement("websockets", ("websockets", "wsproto")),
 )
 
 SERVICE_NAME = "playr-management"

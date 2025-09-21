@@ -20,7 +20,7 @@ _MAX_CAPABILITIES = 32
 _MAX_CAPABILITY_LENGTH = 64
 _MAX_METADATA_ITEMS = 16
 _MAX_METADATA_KEY_LENGTH = 64
-_MAX_METADATA_VALUE_LENGTH = 512
+_MAX_METADATA_VALUE_LENGTH = 8192
 _ALLOWED_PURPOSE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 _MAX_DESCRIPTION_LENGTH = 512
 
@@ -122,7 +122,9 @@ def _normalise_metadata(metadata: Mapping[str, str] | None) -> Dict[str, str]:
         if len(key_text) > _MAX_METADATA_KEY_LENGTH:
             raise ValueError("Metadata keys must be 64 characters or fewer")
         if len(value_text) > _MAX_METADATA_VALUE_LENGTH:
-            raise ValueError("Metadata values must be 512 characters or fewer")
+            raise ValueError(
+                f"Metadata values must be {_MAX_METADATA_VALUE_LENGTH} characters or fewer"
+            )
         cleaned[key_text] = value_text
     return cleaned
 

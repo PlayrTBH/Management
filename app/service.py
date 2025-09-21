@@ -66,6 +66,7 @@ class AgentHeartbeatRequest(BaseModel):
     session_id: str
     agent_token: str
     active_tunnels: Optional[List[str]] = None
+    metadata: Dict[str, str] = Field(default_factory=dict)
 
 
 class TunnelHeartbeatEntry(BaseModel):
@@ -282,6 +283,7 @@ def register_api_routes(
                 session_id=request.session_id,
                 token=request.agent_token,
                 active_tunnels=request.active_tunnels,
+                metadata=request.metadata,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc

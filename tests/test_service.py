@@ -262,6 +262,10 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertIn("sshpass", terminal_payload["ssh_command"])
             self.assertEqual(terminal_payload["remote_port"], 2200)
             self.assertEqual(terminal_payload["local_port"], 22)
+            self.assertIn("websocket_path", terminal_payload)
+            self.assertTrue(
+                terminal_payload["websocket_path"].startswith("/hypervisors/agent-detail/terminal/ws")
+            )
 
             vm_action = client.post("/hypervisors/agent-detail/vms/web-01/start")
             self.assertEqual(vm_action.status_code, 202, vm_action.text)
@@ -319,6 +323,52 @@ class ManagementServiceTests(unittest.TestCase):
                 json={"session_id": session_id, "agent_token": token},
             )
             self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+
+    def test_agent_heartbeat_updates_metadata(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        cpu_payload = [
+            {"id": 0, "label": "Core 0", "usage": 15.2},
+            {"id": 1, "label": "Core 1", "usage": 67.8},
+        ]
+
+        with TestClient(app) as client:
+            connect = client.post(
+                "/v1/agents/connect",
+                auth=self._auth(),
+                json={"agent_id": "agent-metrics", "hostname": "hypervisor-metrics"},
+            )
+            self.assertEqual(connect.status_code, 200, connect.text)
+            payload = connect.json()
+            session_id = payload["session_id"]
+            agent_token = payload["agent_token"]
+
+            heartbeat = client.post(
+                "/v1/agents/agent-metrics/heartbeat",
+                auth=self._auth(),
+                json={
+                    "session_id": session_id,
+                    "agent_token": agent_token,
+                    "metadata": {
+                        "cpu_cores": json.dumps(cpu_payload),
+                        "cpu.logical_cores": "2",
+                        "cpu.physical_cores": "1",
+                    },
+                },
+            )
+            self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+
+            status_response = client.get(
+                "/v1/agents/agent-metrics",
+                auth=self._auth(),
+            )
+            self.assertEqual(status_response.status_code, 200, status_response.text)
+            status_payload = status_response.json()
+            self.assertIn("cpu_cores", status_payload["metadata"])
+            self.assertEqual(status_payload["metadata"]["cpu_cores"], json.dumps(cpu_payload))
+            self.assertEqual(status_payload["metadata"]["cpu.logical_cores"], "2")
+            self.assertEqual(status_payload["metadata"]["cpu.physical_cores"], "1")
 
     def test_web_login_and_dashboard_flow(self) -> None:
         registry = AgentRegistry()

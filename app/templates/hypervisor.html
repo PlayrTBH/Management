@@ -2,6 +2,11 @@
 
 {% block title %}{{ hypervisor.agent_id }} · Hypervisor · PlayrServers Management{% endblock %}
 
+{% block head_extra %}
+  {{ super() }}
+  <link rel="stylesheet" href="{{ request.url_for('static', path='css/xterm.css') }}" />
+{% endblock %}
+
 {% block content %}
 <div id="hypervisor-detail" data-agent="{{ hypervisor.agent_id }}">
   <header class="page-head">
@@ -103,12 +108,15 @@
         <button type="button" class="button" data-ssh-launch>Launch terminal</button>
         <button type="button" class="button" data-ssh-copy disabled>Copy command</button>
       </div>
+      <div class="ssh-terminal__console" data-ssh-console hidden></div>
       <pre class="ssh-terminal__output" data-ssh-output>Click “Launch terminal” to request a secure tunnel.</pre>
       <div class="ssh-terminal__status" data-ssh-status>Ready.</div>
     </div>
   </section>
 </div>
 
+<script src="{{ request.url_for('static', path='js/xterm.js') }}"></script>
+<script src="{{ request.url_for('static', path='js/xterm-addon-fit.js') }}"></script>
 <script>
   document.addEventListener('DOMContentLoaded', () => {
     const container = document.getElementById('hypervisor-detail');
@@ -170,7 +178,190 @@
     const copyButton = sshPanel.querySelector('[data-ssh-copy]');
     const output = sshPanel.querySelector('[data-ssh-output]');
     const status = sshPanel.querySelector('[data-ssh-status]');
+    const consoleElement = sshPanel.querySelector('[data-ssh-console]');
     let lastCommand = '';
+    let terminalSocket = null;
+    let terminalInstance = null;
+    let fitAddon = null;
+    let resizeHandler = null;
+    const textDecoder = window.TextDecoder ? new TextDecoder() : null;
+
+    const closeTerminal = () => {
+      if (terminalSocket) {
+        try {
+          terminalSocket.close();
+        } catch (socketError) {
+          console.warn('Unable to close terminal socket', socketError);
+        }
+      }
+      terminalSocket = null;
+      if (resizeHandler) {
+        window.removeEventListener('resize', resizeHandler);
+        resizeHandler = null;
+      }
+      if (fitAddon && typeof fitAddon.dispose === 'function') {
+        try {
+          fitAddon.dispose();
+        } catch (addonError) {
+          console.warn('Failed to dispose terminal fit addon', addonError);
+        }
+      }
+      fitAddon = null;
+      if (terminalInstance && typeof terminalInstance.dispose === 'function') {
+        terminalInstance.dispose();
+      }
+      terminalInstance = null;
+      if (consoleElement) {
+        consoleElement.innerHTML = '';
+        consoleElement.setAttribute('hidden', 'hidden');
+      }
+    };
+
+    const buildWebSocketUrl = (payload) => {
+      if (!payload) {
+        return null;
+      }
+      if (payload.websocket_url) {
+        return payload.websocket_url;
+      }
+      if (!payload.websocket_path) {
+        return null;
+      }
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${window.location.host}${payload.websocket_path}`;
+    };
+
+    const initialiseTerminal = (payload) => {
+      if (!window.Terminal || !consoleElement) {
+        if (status) {
+          status.textContent = 'Terminal support is unavailable in this browser.';
+        }
+        return;
+      }
+
+      closeTerminal();
+      consoleElement.removeAttribute('hidden');
+
+      terminalInstance = new window.Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        fontFamily: '"JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        fontSize: 14,
+        theme: {
+          background: '#0f172a',
+          foreground: '#e2e8f0',
+          cursor: '#38bdf8',
+        },
+      });
+
+      if (window.FitAddon && typeof window.FitAddon.FitAddon === 'function') {
+        fitAddon = new window.FitAddon.FitAddon();
+        terminalInstance.loadAddon(fitAddon);
+      } else {
+        fitAddon = null;
+      }
+
+      terminalInstance.open(consoleElement);
+
+      if (fitAddon && typeof fitAddon.fit === 'function') {
+        resizeHandler = () => {
+          try {
+            fitAddon.fit();
+          } catch (fitError) {
+            console.debug('Terminal resize failed', fitError);
+          }
+        };
+        resizeHandler();
+        window.addEventListener('resize', resizeHandler);
+      }
+
+      terminalInstance.focus();
+
+      const wsTarget = buildWebSocketUrl(payload);
+      if (!wsTarget) {
+        if (status) {
+          status.textContent = 'Terminal endpoint missing from tunnel response.';
+        }
+        return;
+      }
+
+      try {
+        terminalSocket = new WebSocket(wsTarget);
+      } catch (socketError) {
+        if (status) {
+          status.textContent = 'Failed to open terminal connection.';
+        }
+        console.error('Unable to create terminal socket', socketError);
+        return;
+      }
+
+      terminalSocket.binaryType = 'arraybuffer';
+
+      terminalSocket.addEventListener('open', () => {
+        if (status) {
+          status.textContent = 'Terminal connected. Authenticate with the hypervisor credentials to begin.';
+        }
+        if (launchButton) {
+          launchButton.textContent = 'Reconnect terminal';
+        }
+        if (terminalInstance) {
+          terminalInstance.focus();
+        }
+      });
+
+      terminalSocket.addEventListener('message', (event) => {
+        if (!terminalInstance) {
+          return;
+        }
+        if (event.data instanceof ArrayBuffer) {
+          const view = new Uint8Array(event.data);
+          if (textDecoder) {
+            terminalInstance.write(textDecoder.decode(view));
+          } else {
+            let text = '';
+            for (let i = 0; i < view.length; i += 1) {
+              text += String.fromCharCode(view[i]);
+            }
+            terminalInstance.write(text);
+          }
+          return;
+        }
+        if (typeof event.data === 'string') {
+          terminalInstance.write(event.data);
+        }
+      });
+
+      const handleSocketClose = (event) => {
+        if (resizeHandler) {
+          window.removeEventListener('resize', resizeHandler);
+          resizeHandler = null;
+        }
+        terminalSocket = null;
+        if (terminalInstance) {
+          terminalInstance.write(`\r\nSession closed (code ${event.code}).\r\n`);
+        }
+        if (status) {
+          if (event.wasClean) {
+            status.textContent = 'Terminal session ended.';
+          } else {
+            status.textContent = 'Terminal disconnected. Launch again to reconnect.';
+          }
+        }
+      };
+
+      terminalSocket.addEventListener('close', handleSocketClose);
+      terminalSocket.addEventListener('error', () => {
+        if (status) {
+          status.textContent = 'Terminal encountered a connection issue.';
+        }
+      });
+
+      terminalInstance.onData((data) => {
+        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+          terminalSocket.send(data);
+        }
+      });
+    };
 
     if (launchButton) {
       launchButton.addEventListener('click', async () => {
@@ -190,13 +381,10 @@
           if (!response.ok) {
             throw new Error(payload.detail || 'Unable to create tunnel.');
           }
-          lastCommand = payload.ssh_command || '';
+          lastCommand = payload.ssh_command || payload.command || '';
           if (output) {
             if (lastCommand) {
-              output.textContent = payload.ssh_command;
-            } else if (payload.command) {
-              lastCommand = payload.command;
-              output.textContent = payload.command;
+              output.textContent = lastCommand;
             } else {
               output.textContent = 'Tunnel ready. Use your preferred SSH client with the returned credentials.';
             }
@@ -207,9 +395,10 @@
           if (status) {
             status.textContent = payload.message || `Tunnel ${payload.tunnel_id} established on port ${payload.remote_port}.`;
           }
+          initialiseTerminal(payload);
         } catch (error) {
           if (status) {
-            status.textContent = error.message || 'Unable to request tunnel. Ensure the hypervisor is online.';
+            status.textContent = error && error.message ? error.message : 'Unable to request tunnel. Ensure the hypervisor is online.';
           }
         } finally {
           launchButton.disabled = false;
@@ -234,6 +423,8 @@
         }
       });
     }
+
+    window.addEventListener('beforeunload', closeTerminal);
   });
 </script>
 {% endblock %}

@@ -501,6 +501,37 @@ body {
   font-size: 0.95rem;
 }
 
+.ssh-terminal__console {
+  display: none;
+  height: 320px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  margin-bottom: 1rem;
+  overflow: hidden;
+}
+
+.ssh-terminal__console:not([hidden]) {
+  display: block;
+}
+
+.ssh-terminal__console .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ssh-terminal__console .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 4px;
+}
+
+.ssh-terminal__console .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ssh-terminal__console .xterm {
+  padding: 0.5rem;
+}
+
 .ssh-terminal__output {
   min-height: 120px;
   white-space: pre-wrap;

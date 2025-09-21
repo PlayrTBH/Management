@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 import argparse
+import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -70,12 +72,33 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     subparsers.add_parser("init-db", help="Initialise the management database")
 
     serve_parser = subparsers.add_parser("serve", help="Start the HTTP management service")
-    serve_parser.add_argument("--host", default="0.0.0.0", help="Bind address for the API")
     serve_parser.add_argument(
+        "--api-host",
+        "--host",
+        dest="api_host",
+        default="0.0.0.0",
+        help="Bind address for the agent API (default: 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--api-port",
         "--port",
+        dest="api_port",
         type=int,
         default=8001,
-        help="Port for the HTTPS API (default: 8001)",
+        help="Port for the HTTPS agent API (default: 8001)",
+    )
+    serve_parser.add_argument(
+        "--web-host",
+        dest="web_host",
+        default="0.0.0.0",
+        help="Bind address for the web dashboard (default: 0.0.0.0)",
+    )
+    serve_parser.add_argument(
+        "--web-port",
+        dest="web_port",
+        type=int,
+        default=443,
+        help="Port for the HTTPS web dashboard (default: 443)",
     )
     serve_parser.add_argument(
         "--tunnel-host",
@@ -156,37 +179,97 @@ def _initialise_database() -> Database:
 def _serve(
     *,
     database: Database,
-    host: str,
-    port: int,
+    api_host: str,
+    api_port: int,
+    web_host: str,
+    web_port: int,
     tunnel_host: str | None,
     tunnel_port: int | None,
     ssl_certfile: str | None,
     ssl_keyfile: str | None,
     ssl_keyfile_password: str | None,
 ) -> None:
+    from app.agents import AgentRegistry, DEFAULT_TUNNEL_HOST, DEFAULT_TUNNEL_PORT
     from app.service import create_app
     import uvicorn
 
     if bool(ssl_certfile) ^ bool(ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
-    protocol = "https" if ssl_certfile and ssl_keyfile else "http"
-    logger.info("Starting management API on %s://%s:%s", protocol, host, port)
+    if api_host == web_host and api_port == web_port:
+        raise SystemExit("The API and web dashboard cannot share the same host and port combination.")
 
-    app = create_app(
-        database=database,
-        tunnel_host=tunnel_host,
-        tunnel_port=tunnel_port,
+    protocol = "https" if ssl_certfile and ssl_keyfile else "http"
+    logger.info("Starting management API on %s://%s:%s", protocol, api_host, api_port)
+    logger.info(
+        "Starting management web dashboard on %s://%s:%s",
+        protocol,
+        web_host,
+        web_port,
     )
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
+
+    registry = AgentRegistry(
+        tunnel_host=tunnel_host or DEFAULT_TUNNEL_HOST,
+        tunnel_port=tunnel_port or DEFAULT_TUNNEL_PORT,
+    )
+
+    api_app = create_app(
+        database=database,
+        registry=registry,
+        include_api=True,
+        include_web=False,
+    )
+    web_app = create_app(
+        database=database,
+        registry=registry,
+        include_api=False,
+        include_web=True,
+    )
+
+    api_config = uvicorn.Config(
+        api_app,
+        host=api_host,
+        port=api_port,
         log_level="info",
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
         ssl_keyfile_password=ssl_keyfile_password,
     )
+    web_config = uvicorn.Config(
+        web_app,
+        host=web_host,
+        port=web_port,
+        log_level="info",
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
+        ssl_keyfile_password=ssl_keyfile_password,
+    )
+
+    async def _serve_both() -> None:
+        api_server = uvicorn.Server(api_config)
+        web_server = uvicorn.Server(web_config)
+        api_server.install_signal_handlers = False
+        web_server.install_signal_handlers = False
+
+        tasks = [
+            asyncio.create_task(api_server.serve()),
+            asyncio.create_task(web_server.serve()),
+        ]
+
+        try:
+            await asyncio.gather(*tasks)
+        except Exception:
+            for server in (api_server, web_server):
+                server.should_exit = True
+            raise
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+    asyncio.run(_serve_both())
 
 
 def _run_admin_cli(
@@ -436,8 +519,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "serve":
         _serve(
             database=database,
-            host=args.host,
-            port=args.port,
+            api_host=args.api_host,
+            api_port=args.api_port,
+            web_host=args.web_host,
+            web_port=args.web_port,
             tunnel_host=args.tunnel_host,
             tunnel_port=args.tunnel_port,
             ssl_certfile=args.ssl_certfile,

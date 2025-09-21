@@ -179,6 +179,8 @@
     let terminalInstance = null;
     let fitAddon = null;
     let resizeHandler = null;
+    let consoleClickHandler = null;
+    let consoleFocusHandler = null;
     const textDecoder = window.TextDecoder ? new TextDecoder() : null;
 
     const closeTerminal = () => {
@@ -207,6 +209,15 @@
       }
       terminalInstance = null;
       if (consoleElement) {
+        if (consoleClickHandler) {
+          consoleElement.removeEventListener('mousedown', consoleClickHandler);
+          consoleClickHandler = null;
+        }
+        if (consoleFocusHandler) {
+          consoleElement.removeEventListener('focus', consoleFocusHandler);
+          consoleFocusHandler = null;
+        }
+        consoleElement.removeAttribute('tabindex');
         consoleElement.innerHTML = '';
         consoleElement.setAttribute('hidden', 'hidden');
       }
@@ -258,6 +269,21 @@
 
       terminalInstance.open(consoleElement);
 
+      const focusTerminal = () => {
+        if (terminalInstance) {
+          terminalInstance.focus();
+        }
+      };
+
+      consoleElement.setAttribute('tabindex', '0');
+      consoleFocusHandler = focusTerminal;
+      consoleElement.addEventListener('focus', consoleFocusHandler);
+      consoleClickHandler = (event) => {
+        event.preventDefault();
+        focusTerminal();
+      };
+      consoleElement.addEventListener('mousedown', consoleClickHandler);
+
       if (fitAddon && typeof fitAddon.fit === 'function') {
         resizeHandler = () => {
           try {
@@ -270,7 +296,7 @@
         window.addEventListener('resize', resizeHandler);
       }
 
-      terminalInstance.focus();
+      focusTerminal();
 
       const wsTarget = buildWebSocketUrl(payload);
       if (!wsTarget) {

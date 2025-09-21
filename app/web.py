@@ -1209,7 +1209,9 @@ def register_ui_routes(
 
         await websocket.accept()
 
-        ready = await _wait_for_port("127.0.0.1", tunnel.remote_port)
+        endpoint_host = registry.tunnel_host or "127.0.0.1"
+
+        ready = await _wait_for_port(endpoint_host, tunnel.remote_port)
         if not ready:
             with contextlib.suppress(Exception):
                 await websocket.send_text(
@@ -1220,6 +1222,10 @@ def register_ui_routes(
 
         login_user = tunnel.metadata.get("target_user") or "root"
         remote_port = tunnel.remote_port
+
+        ssh_target = endpoint_host
+        if ":" in ssh_target and not ssh_target.startswith("["):
+            ssh_target = f"[{ssh_target}]"
 
         command = [
             "ssh",
@@ -1236,7 +1242,7 @@ def register_ui_routes(
             "ConnectTimeout=10",
             "-p",
             str(remote_port),
-            f"{login_user}@127.0.0.1",
+            f"{login_user}@{ssh_target}",
         ]
 
         env = os.environ.copy()

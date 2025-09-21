@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.agents import AgentRegistry
+from app.agents import AgentRegistry, _MAX_METADATA_VALUE_LENGTH
 from app.database import Database
 from app.service import create_app
 
@@ -103,6 +103,48 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertEqual(closed.status_code, 200, closed.text)
             closed_payload = closed.json()
             self.assertEqual(closed_payload["state"], "closed")
+
+    def test_agent_connection_accepts_large_metadata_values(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        large_value = "x" * 6000
+
+        with TestClient(app) as client:
+            connect = client.post(
+                "/v1/agents/connect",
+                auth=self._auth(),
+                json={
+                    "agent_id": "agent-large-metadata",
+                    "hostname": "hypervisor-large",
+                    "metadata": {"cpu_cores": large_value},
+                },
+            )
+
+            self.assertEqual(connect.status_code, 200, connect.text)
+            payload = connect.json()
+            self.assertEqual(payload["metadata"]["cpu_cores"], large_value)
+
+    def test_agent_connection_rejects_metadata_value_above_limit(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        with TestClient(app) as client:
+            connect = client.post(
+                "/v1/agents/connect",
+                auth=self._auth(),
+                json={
+                    "agent_id": "agent-too-much-metadata",
+                    "hostname": "hypervisor-too-much",
+                    "metadata": {
+                        "cpu_cores": "x" * (_MAX_METADATA_VALUE_LENGTH + 1)
+                    },
+                },
+            )
+
+            self.assertEqual(connect.status_code, 400, connect.text)
+            payload = connect.json()
+            self.assertIn(str(_MAX_METADATA_VALUE_LENGTH), payload["detail"])
 
     def test_agent_cannot_be_claimed_by_other_user(self) -> None:
         other = self.database.create_user("Bob", "bob@example.com", "Password456?")

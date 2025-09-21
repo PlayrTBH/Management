@@ -120,7 +120,7 @@ create_virtualenv() {
   fi
   print_header "Installing Python dependencies"
   "${agent_home}/venv/bin/pip" install --upgrade pip >/dev/null
-  "${agent_home}/venv/bin/pip" install httpx >/dev/null
+  "${agent_home}/venv/bin/pip" install httpx psutil >/dev/null
 }
 
 write_agent_runtime() {
@@ -144,6 +144,11 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import httpx
+
+try:
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    psutil = None
 
 DEFAULT_HEARTBEAT = 30
 _LOGGER = logging.getLogger("playr.agent")
@@ -303,16 +308,54 @@ class AgentRuntime:
         await self._client.aclose()
         await asyncio.gather(*(tunnel.stop() for tunnel in list(self._tunnels.values())), return_exceptions=True)
 
+    def _collect_system_metadata(self) -> Dict[str, str]:
+        metadata: Dict[str, str] = {}
+        if psutil is None:
+            return metadata
+        try:
+            cpu_percentages = psutil.cpu_percent(interval=0.1, percpu=True)
+        except Exception as exc:  # pragma: no cover - defensive sampling
+            _LOGGER.debug("Unable to sample CPU metrics: %s", exc)
+            return metadata
+
+        cores = []
+        for index, value in enumerate(cpu_percentages):
+            try:
+                usage = float(value)
+            except (TypeError, ValueError):
+                continue
+            cores.append({"id": index, "label": f"Core {index}", "usage": round(usage, 1)})
+        if cores:
+            metadata["cpu_cores"] = json.dumps(cores)
+
+        try:
+            logical = psutil.cpu_count() or 0
+        except Exception:  # pragma: no cover - defensive sampling
+            logical = 0
+        if logical:
+            metadata["cpu.logical_cores"] = str(logical)
+
+        try:
+            physical = psutil.cpu_count(logical=False) or 0
+        except Exception:  # pragma: no cover - defensive sampling
+            physical = 0
+        if physical:
+            metadata["cpu.physical_cores"] = str(physical)
+
+        return metadata
+
     async def _connect(self) -> None:
+        metadata = {
+            **self.config.metadata,
+            "os": platform.platform(),
+            "python": sys.version.split()[0],
+        }
+        metadata.update(self._collect_system_metadata())
         payload = {
             "agent_id": self.config.agent_id,
             "hostname": self.config.hostname,
             "capabilities": list(self.config.capabilities),
-            "metadata": {
-                **self.config.metadata,
-                "os": platform.platform(),
-                "python": sys.version.split()[0],
-            },
+            "metadata": metadata,
         }
         _LOGGER.info("Connecting agent %s to %s", self.config.agent_id, self.config.management_url)
         response = await self._client.post(
@@ -337,13 +380,17 @@ class AgentRuntime:
 
     async def _sync_state(self) -> None:
         active = [identifier for identifier, tunnel in self._tunnels.items() if tunnel.is_active()]
+        heartbeat_payload = {
+            "session_id": self.session_id,
+            "agent_token": self.agent_token,
+            "active_tunnels": active,
+        }
+        metrics = self._collect_system_metadata()
+        if metrics:
+            heartbeat_payload["metadata"] = metrics
         response = await self._client.post(
             f"/v1/agents/{self.config.agent_id}/heartbeat",
-            json={
-                "session_id": self.session_id,
-                "agent_token": self.agent_token,
-                "active_tunnels": active,
-            },
+            json=heartbeat_payload,
             headers=self._auth_header(),
         )
         if response.status_code == 401:

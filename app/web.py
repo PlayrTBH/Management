@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import html
 import json
 import logging
+import os
+import pty
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, status
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -427,6 +431,32 @@ def _next_remote_port(session: AgentSession, *, start: int = 2200) -> int:
         while port in used_ports and port < 2000:
             port += 1
     return port
+
+
+async def _wait_for_port(host: str, port: int, timeout: float = 20.0) -> bool:
+    """Poll ``host``/``port`` until reachable or the timeout elapses."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+        except OSError:
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
+            continue
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        return True
 
 
 def register_ui_routes(
@@ -927,8 +957,10 @@ def register_ui_routes(
         data = parse_qs(decoded, keep_blank_values=True)
         return data.get("name", [""])[0]
 
-    def _load_user(request: Request) -> Tuple[Optional[User], Optional[str]]:
-        token = request.cookies.get(SESSION_COOKIE_NAME)
+    def _load_user_from_cookies(
+        cookies: Mapping[str, str] | None,
+    ) -> Tuple[Optional[User], Optional[str]]:
+        token = cookies.get(SESSION_COOKIE_NAME) if cookies else None
         if not token:
             return None, None
         user_id = session_manager.resolve(token)
@@ -939,6 +971,9 @@ def register_ui_routes(
             session_manager.destroy(token)
             return None, token
         return user, token
+
+    def _load_user(request: Request) -> Tuple[Optional[User], Optional[str]]:
+        return _load_user_from_cookies(request.cookies)
 
     def _clear_session_cookie(response, token: Optional[str]) -> None:
         if token:
@@ -1167,8 +1202,184 @@ def register_ui_routes(
             "endpoint": {"host": summary.endpoint_host, "port": summary.endpoint_port},
             "ssh_command": ssh_command,
             "message": message,
+            "websocket_path": str(
+                request.app.url_path_for("ui_hypervisor_terminal_ws", agent_id=agent_id)
+            )
+            + f"?tunnel_id={tunnel.id}",
         }
         return JSONResponse(payload)
+
+    @router.websocket("/hypervisors/{agent_id}/terminal/ws", name="ui_hypervisor_terminal_ws")
+    async def hypervisor_terminal_ws(
+        websocket: WebSocket,
+        agent_id: str,
+        tunnel_id: str = Query(..., alias="tunnel_id"),
+    ):
+        user, _ = _load_user_from_cookies(websocket.cookies)
+        if user is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        try:
+            session = await registry.get_session(agent_id=agent_id, user_id=user.id)
+        except (PermissionError, KeyError):
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        tunnel = session.tunnels.get(str(tunnel_id))
+        if tunnel is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
+        await websocket.accept()
+
+        ready = await _wait_for_port("127.0.0.1", tunnel.remote_port)
+        if not ready:
+            with contextlib.suppress(Exception):
+                await websocket.send_text(
+                    "Unable to reach the remote tunnel. The hypervisor may still be initialising."
+                )
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            return
+
+        login_user = tunnel.metadata.get("target_user") or _resolve_ssh_defaults(session.metadata)[1]
+        remote_port = tunnel.remote_port
+
+        command = [
+            "ssh",
+            "-tt",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "ConnectTimeout=10",
+            "-p",
+            str(remote_port),
+            f"{login_user}@127.0.0.1",
+        ]
+
+        env = os.environ.copy()
+        env.setdefault("TERM", "xterm-256color")
+
+        master_fd, slave_fd = pty.openpty()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=env,
+            )
+        except FileNotFoundError:
+            with contextlib.suppress(Exception):
+                await websocket.send_text("SSH binary is not available on the management host.")
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            with contextlib.suppress(OSError):
+                os.close(master_fd)
+                os.close(slave_fd)
+            return
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(slave_fd)
+
+        loop = asyncio.get_running_loop()
+        socket_open = True
+
+        async def _forward_output() -> None:
+            nonlocal socket_open
+            try:
+                while True:
+                    data = await loop.run_in_executor(None, os.read, master_fd, 4096)
+                    if not data:
+                        break
+                    await websocket.send_bytes(data)
+            except WebSocketDisconnect:
+                socket_open = False
+            except RuntimeError:
+                socket_open = False
+            except Exception:  # pragma: no cover - defensive
+                socket_open = False
+
+        async def _forward_input() -> None:
+            nonlocal socket_open
+            try:
+                while True:
+                    message = await websocket.receive()
+                    if message.get("type") == "websocket.disconnect":
+                        socket_open = False
+                        break
+                    text = message.get("text")
+                    if text is not None:
+                        try:
+                            os.write(master_fd, text.encode())
+                        except OSError:
+                            break
+                        continue
+                    payload = message.get("bytes")
+                    if payload is not None:
+                        try:
+                            os.write(master_fd, payload)
+                        except OSError:
+                            break
+            except WebSocketDisconnect:
+                socket_open = False
+            except RuntimeError:
+                socket_open = False
+            except Exception:  # pragma: no cover - defensive
+                socket_open = False
+
+        output_task = asyncio.create_task(_forward_output())
+        input_task = asyncio.create_task(_forward_input())
+        process_task = asyncio.create_task(process.wait())
+
+        done, pending = await asyncio.wait(
+            {output_task, input_task, process_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        for task in pending:
+            task.cancel()
+
+        with contextlib.suppress(Exception):
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        if process_task in done:
+            exit_code = process_task.result()
+        else:
+            exit_code = None
+
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError, asyncio.TimeoutError):
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5)
+
+        with contextlib.suppress(OSError):
+            os.close(master_fd)
+
+        try:
+            await registry.close_tunnel(
+                agent_id=agent_id,
+                user_id=user.id,
+                session_id=session.session_id,
+                token=session.token,
+                tunnel_id=str(tunnel_id),
+            )
+        except PermissionError:  # pragma: no cover - defensive
+            logger.warning("User %s is no longer authorised to close tunnel %s", user.id, tunnel_id)
+        except KeyError:  # pragma: no cover - defensive
+            logger.warning("Tunnel %s vanished before it could be closed", tunnel_id)
+
+        if socket_open:
+            close_message = "Terminal session ended." if exit_code == 0 else "Terminal session closed."
+            with contextlib.suppress(Exception):
+                await websocket.send_text(close_message)
+            with contextlib.suppress(Exception):
+                await websocket.close()
 
     @router.post(
         "/hypervisors/{agent_id}/vms/{vm_id}/{action}",

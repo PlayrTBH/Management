@@ -222,6 +222,7 @@ class AgentRegistry:
         session_id: str,
         token: str,
         active_tunnels: Iterable[str] | None = None,
+        metadata: Mapping[str, str] | None = None,
     ) -> AgentSession:
         """Update the activity timestamp for an agent and refresh tunnel state."""
 
@@ -238,6 +239,9 @@ class AgentRegistry:
             session.last_seen = now
             if active_tunnels is not None:
                 self._update_tunnel_activity(session, active_tunnels, now)
+            if metadata:
+                normalised_metadata = _normalise_metadata(metadata)
+                session.metadata.update(normalised_metadata)
             return session
 
     async def create_tunnel(

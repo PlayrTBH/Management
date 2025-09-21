@@ -65,6 +65,33 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Password for the initial administrator account (non-interactive mode)",
     )
+    parser.add_argument(
+        "--ssl-certfile",
+        dest="ssl_certfile",
+        default=None,
+        help=(
+            "Path to an existing TLS certificate chain in PEM format. When omitted, "
+            "the installer will generate a self-signed certificate."
+        ),
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        dest="ssl_keyfile",
+        default=None,
+        help=(
+            "Path to an existing TLS private key in PEM format. When omitted, a "
+            "matching self-signed key will be generated."
+        ),
+    )
+    parser.add_argument(
+        "--ssl-common-name",
+        dest="ssl_common_name",
+        default="manage.playrservers.com",
+        help=(
+            "Common Name used when generating a self-signed TLS certificate. "
+            "Default: manage.playrservers.com"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -101,7 +128,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory={working_dir}
-ExecStart={python} {entrypoint} serve --host 0.0.0.0 --port 443
+ExecStart={exec_start}
 Restart=on-failure
 Environment=MANAGEMENT_DB_PATH={db_path}
 Environment=PYTHONUNBUFFERED=1
@@ -184,15 +211,30 @@ def _render_systemd_unit(
     python: Path | None = None,
     entrypoint: Path | None = None,
     working_dir: Path | None = None,
+    ssl_certfile: Path,
+    ssl_keyfile: Path,
 ) -> str:
     python_path = Path(python or sys.executable)
     entry_path = Path(entrypoint or (ROOT / "main.py"))
     workdir = Path(working_dir or ROOT)
+    exec_parts = [
+        str(python_path),
+        str(entry_path),
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "443",
+        "--ssl-certfile",
+        str(ssl_certfile),
+        "--ssl-keyfile",
+        str(ssl_keyfile),
+    ]
+    exec_start = shlex.join(exec_parts)
 
     return SYSTEMD_UNIT_TEMPLATE.format(
         working_dir=str(workdir),
-        python=str(python_path),
-        entrypoint=str(entry_path),
+        exec_start=exec_start,
         db_path=str(db_path),
     )
 
@@ -213,6 +255,8 @@ def create_systemd_service(
     python: Path | None = None,
     entrypoint: Path | None = None,
     working_dir: Path | None = None,
+    ssl_certfile: Path,
+    ssl_keyfile: Path,
 ) -> Path:
     target_dir = _resolve_service_directory(service_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -223,6 +267,8 @@ def create_systemd_service(
         python=python,
         entrypoint=entrypoint,
         working_dir=working_dir,
+        ssl_certfile=ssl_certfile,
+        ssl_keyfile=ssl_keyfile,
     )
 
     existing_contents = (
@@ -239,6 +285,99 @@ def create_systemd_service(
     _invoke_systemctl("enable", SERVICE_NAME)
     _invoke_systemctl("restart", SERVICE_NAME)
     return service_path
+
+
+def _default_tls_directory() -> Path:
+    return ROOT / "data" / "tls"
+
+
+def _resolve_tls_paths(cert_path: Path, key_path: Path) -> tuple[Path, Path]:
+    return cert_path.resolve(), key_path.resolve()
+
+
+def _generate_self_signed_certificate(cert_path: Path, key_path: Path, *, common_name: str) -> None:
+    """Generate a self-signed TLS certificate using OpenSSL."""
+
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise RuntimeError(
+            "OpenSSL is required to auto-generate TLS certificates. Install it or "
+            "provide --ssl-certfile/--ssl-keyfile paths to existing credentials."
+        )
+
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with contextlib.suppress(FileNotFoundError):
+        cert_path.unlink()
+    with contextlib.suppress(FileNotFoundError):
+        key_path.unlink()
+
+    command = [
+        openssl,
+        "req",
+        "-x509",
+        "-nodes",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        str(key_path),
+        "-out",
+        str(cert_path),
+        "-days",
+        "825",
+        "-subj",
+        f"/CN={common_name}",
+    ]
+
+    print("Generating self-signed TLS certificate...")
+    run_command(command)
+    try:
+        key_path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def ensure_tls_material(
+    certfile: str | None,
+    keyfile: str | None,
+    *,
+    common_name: str,
+) -> tuple[Path, Path, bool]:
+    """Return TLS certificate/key paths, generating them when necessary."""
+
+    if certfile or keyfile:
+        if not certfile or not keyfile:
+            raise ValueError("Both --ssl-certfile and --ssl-keyfile must be provided together.")
+
+        cert_path = Path(certfile).expanduser()
+        key_path = Path(keyfile).expanduser()
+        cert_resolved, key_resolved = _resolve_tls_paths(cert_path, key_path)
+
+        if not cert_resolved.exists():
+            raise ValueError(f"TLS certificate not found at: {cert_resolved}")
+        if not key_resolved.exists():
+            raise ValueError(f"TLS private key not found at: {key_resolved}")
+
+        print(f"Using provided TLS certificate: {cert_resolved}")
+        print(f"Using provided TLS private key: {key_resolved}")
+        return cert_resolved, key_resolved, False
+
+    tls_dir = _default_tls_directory()
+    cert_path = tls_dir / "management.crt"
+    key_path = tls_dir / "management.key"
+
+    cert_resolved, key_resolved = _resolve_tls_paths(cert_path, key_path)
+
+    if cert_resolved.exists() and key_resolved.exists():
+        print(f"Reusing existing TLS certificate: {cert_resolved}")
+        print(f"Reusing existing TLS private key: {key_resolved}")
+        return cert_resolved, key_resolved, False
+
+    _generate_self_signed_certificate(cert_resolved, key_resolved, common_name=common_name)
+    print(f"Self-signed TLS certificate stored at: {cert_resolved}")
+    print(f"Self-signed TLS private key stored at: {key_resolved}")
+    return cert_resolved, key_resolved, True
 
 
 @contextlib.contextmanager
@@ -487,7 +626,16 @@ def main() -> int:
             admin_email=args.admin_email,
             admin_password=args.admin_password,
         )
-        service_unit_path = create_systemd_service(db_path)
+        cert_path, key_path, generated_cert = ensure_tls_material(
+            args.ssl_certfile,
+            args.ssl_keyfile,
+            common_name=args.ssl_common_name,
+        )
+        service_unit_path = create_systemd_service(
+            db_path,
+            ssl_certfile=cert_path,
+            ssl_keyfile=key_path,
+        )
     except subprocess.CalledProcessError as exc:
         cmd = exc.cmd
         if isinstance(cmd, (list, tuple)):
@@ -497,6 +645,9 @@ def main() -> int:
         print(f"Command failed with exit code {exc.returncode}: {cmd_display}", file=sys.stderr)
         return exc.returncode or 1
     except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except UserInputError as exc:
@@ -509,13 +660,28 @@ def main() -> int:
     print("\nInstallation complete!\n")
     print("Next steps:")
     service_entry = ROOT / "main.py"
-    start_command = (
-        f"python {service_entry} serve --host 0.0.0.0 --port 443 "
-        "--ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem"
-    )
+    start_parts = [
+        "python",
+        str(service_entry),
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "443",
+        "--ssl-certfile",
+        str(cert_path),
+        "--ssl-keyfile",
+        str(key_path),
+    ]
+    start_command = shlex.join(start_parts)
     print(f"  • Start the API with: {start_command}")
     print(f"  • Database stored at: {db_path}")
     print(f"  • systemd unit installed at: {service_unit_path}")
+    if generated_cert:
+        print(
+            "  • A self-signed TLS certificate was generated for initial connectivity. "
+            "Replace it with a trusted certificate when possible."
+        )
     return 0
 
 

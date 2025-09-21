@@ -312,6 +312,12 @@ class ManagementServiceTests(unittest.TestCase):
                 terminal_payload["websocket_path"].startswith("/hypervisors/agent-detail/terminal/ws")
             )
 
+            session = registry._sessions.get("agent-detail")
+            self.assertIsNotNone(session)
+            tunnels = list(session.tunnels.values())
+            self.assertEqual(len(tunnels), 1)
+            self.assertEqual(tunnels[0].metadata.get("target_user"), "admin")
+
             vm_action = client.post("/hypervisors/agent-detail/vms/web-01/start")
             self.assertEqual(vm_action.status_code, 202, vm_action.text)
             action_payload = vm_action.json()

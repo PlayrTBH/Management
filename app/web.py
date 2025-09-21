@@ -1146,8 +1146,7 @@ def register_ui_routes(
             raise HTTPException(status.HTTP_409_CONFLICT, detail="Hypervisor is offline")
 
         summary = _session_to_summary(session, registry)
-        _, _, local_port = _resolve_ssh_defaults(session.metadata)
-        login_user = "root"
+        _, login_user, local_port = _resolve_ssh_defaults(session.metadata)
         remote_port = _next_remote_port(session)
 
         metadata = {
@@ -1209,10 +1208,21 @@ def register_ui_routes(
 
         await websocket.accept()
 
-        endpoint_host = registry.tunnel_host or "127.0.0.1"
+        remote_port = tunnel.remote_port
 
-        ready = await _wait_for_port(endpoint_host, tunnel.remote_port)
-        if not ready:
+        candidate_hosts: List[str] = []
+        for host in ("127.0.0.1", "::1", "localhost", registry.tunnel_host):
+            if host and host not in candidate_hosts:
+                candidate_hosts.append(str(host))
+
+        connection_host: str | None = None
+        for host in candidate_hosts:
+            ready = await _wait_for_port(host, remote_port)
+            if ready:
+                connection_host = host
+                break
+
+        if connection_host is None:
             with contextlib.suppress(Exception):
                 await websocket.send_text(
                     "Unable to reach the remote tunnel. The hypervisor may still be initialising."
@@ -1221,9 +1231,8 @@ def register_ui_routes(
             return
 
         login_user = tunnel.metadata.get("target_user") or "root"
-        remote_port = tunnel.remote_port
 
-        ssh_target = endpoint_host
+        ssh_target = connection_host
         if ":" in ssh_target and not ssh_target.startswith("["):
             ssh_target = f"[{ssh_target}]"
 

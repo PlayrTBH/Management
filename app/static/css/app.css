@@ -532,12 +532,6 @@ body {
   padding: 0.5rem;
 }
 
-.ssh-terminal__output {
-  min-height: 120px;
-  white-space: pre-wrap;
-  margin: 0;
-}
-
 .ssh-terminal__actions {
   display: flex;
   flex-wrap: wrap;

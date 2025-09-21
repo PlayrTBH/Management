@@ -19,6 +19,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.websockets import WebSocketState
 
 from .agents import AgentRegistry, AgentSession, Tunnel, TunnelState
 from .database import Database
@@ -459,6 +460,15 @@ async def _wait_for_port(host: str, port: int, timeout: float = 20.0) -> bool:
         return True
 
 
+async def _close_websocket(websocket: WebSocket, *, code: int) -> None:
+    """Close a WebSocket connection while ignoring double-close errors."""
+
+    if websocket.application_state is WebSocketState.DISCONNECTED:
+        return
+    with contextlib.suppress(RuntimeError):
+        await websocket.close(code=code)
+
+
 def register_ui_routes(
     app: FastAPI,
     database: Database,
@@ -807,7 +817,6 @@ def register_ui_routes(
         host_overview = context.get("host_overview", [])
         cpu_metrics = context.get("cpu_metrics", [])
         virtual_machines = context.get("virtual_machines", [])
-        ssh_command = context.get("ssh_command_example")
         stylesheet = request.url_for("static", path="css/app.css")
 
         overview_rows = [
@@ -847,12 +856,6 @@ def register_ui_routes(
         else:
             vm_html = "<p class=\"text-muted\">No virtual machines reported.</p>"
 
-        ssh_html = ""
-        if ssh_command:
-            ssh_html = """
-    <div class=\"callout\"><code>{command}</code></div>
-""".format(command=html.escape(str(ssh_command)))
-
         body = f"""
 <header class=\"page-head\">
   <div class=\"page-head__content\">
@@ -884,7 +887,6 @@ def register_ui_routes(
 <section class=\"card\">
   <h2 class=\"card__title\">SSH terminal</h2>
   <p>Request a secure shell via the management plane.</p>
-{ssh_html}
 </section>
 """
 
@@ -1111,16 +1113,10 @@ def register_ui_routes(
 
         summary = _session_to_summary(session, registry)
         host_overview = _collect_host_overview(summary)
-        bastion_user, login_user, local_port = _resolve_ssh_defaults(session.metadata)
-        if login_user:
-            host_overview.append(("SSH login", f"{login_user}@{summary.hostname}"))
+        host_overview.append(("SSH access", f"root@{summary.hostname} (web terminal)"))
 
         cpu_metrics = _parse_cpu_metrics(session.metadata)
         virtual_machines = _parse_virtual_machines(session.metadata)
-        ssh_example = (
-            f"ssh -o ProxyCommand=\"ssh -W 127.0.0.1:<remote-port> {bastion_user}@{summary.endpoint_host} "
-            f"-p {summary.endpoint_port}\" {login_user}@127.0.0.1"
-        )
 
         context = _base_context(
             request,
@@ -1129,12 +1125,6 @@ def register_ui_routes(
             host_overview=host_overview,
             cpu_metrics=cpu_metrics,
             virtual_machines=virtual_machines,
-            ssh_defaults={
-                "bastion_user": bastion_user,
-                "login_user": login_user,
-                "local_port": local_port,
-            },
-            ssh_command_example=ssh_example,
         )
         response = _render_hypervisor_response(request, context)
         if token:
@@ -1156,7 +1146,8 @@ def register_ui_routes(
             raise HTTPException(status.HTTP_409_CONFLICT, detail="Hypervisor is offline")
 
         summary = _session_to_summary(session, registry)
-        bastion_user, login_user, local_port = _resolve_ssh_defaults(session.metadata)
+        _, _, local_port = _resolve_ssh_defaults(session.metadata)
+        login_user = "root"
         remote_port = _next_remote_port(session)
 
         metadata = {
@@ -1176,22 +1167,8 @@ def register_ui_routes(
             metadata=metadata,
         )
 
-        ssh_command = (
-            "ssh -o ProxyCommand=\"sshpass -p '{token}' ssh -W 127.0.0.1:{remote_port} "
-            "{bastion}@{host} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" "
-            "{login}@127.0.0.1 -p {local_port}"
-        ).format(
-            token=tunnel.token,
-            remote_port=tunnel.remote_port,
-            bastion=bastion_user,
-            host=summary.endpoint_host,
-            port=summary.endpoint_port,
-            login=login_user,
-            local_port=local_port,
-        )
-
         message = (
-            f"Tunnel {tunnel.id} established. Connect as {login_user}@127.0.0.1 using the command below."
+            "Tunnel ready. Opening a root session through the management plane."
         )
 
         payload = {
@@ -1200,7 +1177,6 @@ def register_ui_routes(
             "local_port": local_port,
             "client_token": tunnel.token,
             "endpoint": {"host": summary.endpoint_host, "port": summary.endpoint_port},
-            "ssh_command": ssh_command,
             "message": message,
             "websocket_path": str(
                 request.app.url_path_for("ui_hypervisor_terminal_ws", agent_id=agent_id)
@@ -1217,18 +1193,18 @@ def register_ui_routes(
     ):
         user, _ = _load_user_from_cookies(websocket.cookies)
         if user is None:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            await _close_websocket(websocket, code=status.WS_1008_POLICY_VIOLATION)
             return
 
         try:
             session = await registry.get_session(agent_id=agent_id, user_id=user.id)
         except (PermissionError, KeyError):
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            await _close_websocket(websocket, code=status.WS_1008_POLICY_VIOLATION)
             return
 
         tunnel = session.tunnels.get(str(tunnel_id))
         if tunnel is None:
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            await _close_websocket(websocket, code=status.WS_1008_POLICY_VIOLATION)
             return
 
         await websocket.accept()
@@ -1239,10 +1215,10 @@ def register_ui_routes(
                 await websocket.send_text(
                     "Unable to reach the remote tunnel. The hypervisor may still be initialising."
                 )
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            await _close_websocket(websocket, code=status.WS_1011_INTERNAL_ERROR)
             return
 
-        login_user = tunnel.metadata.get("target_user") or _resolve_ssh_defaults(session.metadata)[1]
+        login_user = tunnel.metadata.get("target_user") or "root"
         remote_port = tunnel.remote_port
 
         command = [
@@ -1278,7 +1254,7 @@ def register_ui_routes(
         except FileNotFoundError:
             with contextlib.suppress(Exception):
                 await websocket.send_text("SSH binary is not available on the management host.")
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            await _close_websocket(websocket, code=status.WS_1011_INTERNAL_ERROR)
             with contextlib.suppress(OSError):
                 os.close(master_fd)
                 os.close(slave_fd)
@@ -1379,7 +1355,7 @@ def register_ui_routes(
             with contextlib.suppress(Exception):
                 await websocket.send_text(close_message)
             with contextlib.suppress(Exception):
-                await websocket.close()
+                await _close_websocket(websocket, code=status.WS_1000_NORMAL_CLOSURE)
 
     @router.post(
         "/hypervisors/{agent_id}/vms/{vm_id}/{action}",

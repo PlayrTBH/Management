@@ -65,7 +65,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PlayrServers management utilities")
     subparsers = parser.add_subparsers(dest="command")
 
-    parser.set_defaults(command="admin")
+    parser.set_defaults(command="serve")
 
     subparsers.add_parser("init-db", help="Initialise the management database")
 
@@ -121,7 +121,21 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         ),
     )
 
-    return parser.parse_args(argv)
+    args_list = list(argv) if argv is not None else sys.argv[1:]
+    known_commands = {"serve", "admin", "init-db"}
+
+    if not args_list:
+        args_list = ["serve"]
+    else:
+        first = args_list[0]
+        if first in ("-h", "--help"):
+            return parser.parse_args(args_list)
+        if first not in known_commands:
+            if any(flag in args_list for flag in ("-h", "--help")):
+                return parser.parse_args(args_list)
+            args_list = ["serve", *args_list]
+
+    return parser.parse_args(args_list)
 
 
 def _project_root() -> Path:

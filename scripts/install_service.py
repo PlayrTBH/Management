@@ -510,10 +510,10 @@ def main() -> int:
     print("Next steps:")
     service_entry = ROOT / "main.py"
     start_command = (
-        f"python {service_entry} serve --host 0.0.0.0 --port 443 "
+        f"python {service_entry} --host 0.0.0.0 --port 443 "
         "--ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem"
     )
-    print(f"  • Start the API with: {start_command}")
+    print(f"  • Start the management service with: {start_command}")
     print(f"  • Database stored at: {db_path}")
     print(f"  • systemd unit installed at: {service_unit_path}")
     return 0

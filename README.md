@@ -16,8 +16,10 @@ clean foundation.
   request encrypted tunnels that terminate on `manage.playrservers.com:443`.
 - ✅ **Secure web dashboard** – administrators can sign in at
   `https://<host>/` to review their account and view paired hypervisors.
-- ✅ **Command-line bootstrap** – `python main.py` initialises the database by
-  default, while `python main.py serve` launches the HTTP control plane.
+- ✅ **Command-line bootstrap** – `python main.py` now launches the management
+  service (initialising the database automatically). Access the interactive
+  console with `python main.py admin` when you need to manage accounts from the
+  terminal.
 
 ## Getting started
 
@@ -51,7 +53,8 @@ python scripts/install_service.py
 ```
 
 Use `--skip-deps` if you prefer to manage Python packages yourself. When the
-script completes you can start the API with `python main.py serve`.
+script completes you can start the management service with `python main.py`
+and optional flags (for example `--host`, `--port`, or TLS settings).
 
 To run the installer without interactive prompts, provide the initial account
 details via flags:
@@ -103,7 +106,7 @@ pip install -r requirements.txt
 Initialise the database and create a test user:
 
 ```bash
-python main.py
+python main.py init-db
 python scripts/create_user.py "Test User" test@example.com
 ```
 
@@ -114,7 +117,7 @@ your TLS certificate and private key so the management portal is available over
 HTTPS on port 443:
 
 ```bash
-python main.py serve \
+python main.py \
   --host 0.0.0.0 \
   --port 443 \
   --ssl-certfile /etc/ssl/certs/management.crt \

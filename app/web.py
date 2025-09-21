@@ -1211,7 +1211,9 @@ def register_ui_routes(
         remote_port = tunnel.remote_port
 
         candidate_hosts: List[str] = []
-        for host in ("127.0.0.1", "::1", "localhost", registry.tunnel_host):
+        # Prefer the advertised tunnel host so we do not block on localhost probes
+        # when the reverse tunnel terminates on a remote bastion.
+        for host in (registry.tunnel_host, "127.0.0.1", "::1", "localhost"):
             if host and host not in candidate_hosts:
                 candidate_hosts.append(str(host))
 

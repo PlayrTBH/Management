@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import (
@@ -222,43 +222,13 @@ def _build_auth_dependency(database: Database):
     return dependency
 
 
-def create_app(
+def register_api_routes(
+    app: FastAPI,
+    registry: AgentRegistry,
     *,
-    database: Database | None = None,
-    registry: AgentRegistry | None = None,
-    tunnel_host: str | None = None,
-    tunnel_port: int | None = None,
-) -> FastAPI:
-    """Instantiate the FastAPI application for the management plane."""
-
-    db = database or Database(resolve_database_path(os.getenv("MANAGEMENT_DB_PATH")))
-    _initialise_database(db)
-
-    app_registry = registry or AgentRegistry(
-        tunnel_host=tunnel_host or DEFAULT_TUNNEL_HOST,
-        tunnel_port=tunnel_port or DEFAULT_TUNNEL_PORT,
-    )
-
-    app = FastAPI(
-        title="PlayrServers Management API",
-        version="0.1.0",
-        description="Control plane for authenticated hypervisor management tunnels.",
-    )
-
-    secure_cookies = _use_secure_cookies()
-    if not secure_cookies:
-        logger.warning(
-            "Session cookies are not marked as secure. Only disable secure cookies for"
-            " local development."
-        )
-
-    session_manager = SessionManager(ttl=timedelta(hours=8))
-
-    app.state.database = db
-    app.state.registry = app_registry
-    app.state.session_manager = session_manager
-
-    current_user = _build_auth_dependency(db)
+    current_user: Callable[..., User],
+) -> None:
+    """Expose the JSON API endpoints on the provided FastAPI application."""
 
     @app.get("/healthz")
     async def healthcheck() -> Dict[str, str]:
@@ -270,7 +240,7 @@ def create_app(
         user: User = Depends(current_user),
     ) -> AgentConnectResponse:
         try:
-            session = await app_registry.connect_agent(
+            session = await registry.connect_agent(
                 agent_id=request.agent_id,
                 user_id=user.id,
                 hostname=request.hostname,
@@ -292,11 +262,11 @@ def create_app(
             capabilities=list(session.capabilities),
             metadata=dict(session.metadata),
             tunnel_endpoint=TunnelEndpoint(
-                host=app_registry.tunnel_host,
-                port=app_registry.tunnel_port,
+                host=registry.tunnel_host,
+                port=registry.tunnel_port,
             ),
             connected_at=session.created_at,
-            expires_at=session.expires_at(app_registry.session_timeout),
+            expires_at=session.expires_at(registry.session_timeout),
         )
 
     @app.post("/v1/agents/{agent_id}/heartbeat", response_model=AgentHeartbeatResponse)
@@ -306,7 +276,7 @@ def create_app(
         user: User = Depends(current_user),
     ) -> AgentHeartbeatResponse:
         try:
-            session = await app_registry.heartbeat(
+            session = await registry.heartbeat(
                 agent_id=agent_id,
                 user_id=user.id,
                 session_id=request.session_id,
@@ -320,7 +290,7 @@ def create_app(
         except KeyError:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-        return _heartbeat_to_response(session, app_registry)
+        return _heartbeat_to_response(session, registry)
 
     @app.post(
         "/v1/agents/{agent_id}/tunnels",
@@ -333,7 +303,7 @@ def create_app(
         user: User = Depends(current_user),
     ) -> TunnelCreateResponse:
         try:
-            tunnel, session = await app_registry.create_tunnel(
+            tunnel, session = await registry.create_tunnel(
                 agent_id=agent_id,
                 user_id=user.id,
                 session_id=request.session_id,
@@ -359,8 +329,8 @@ def create_app(
             remote_port=tunnel.remote_port,
             client_token=tunnel.token,
             endpoint=TunnelEndpoint(
-                host=app_registry.tunnel_host,
-                port=app_registry.tunnel_port,
+                host=registry.tunnel_host,
+                port=registry.tunnel_port,
             ),
             created_at=tunnel.created_at,
             updated_at=tunnel.updated_at,
@@ -379,7 +349,7 @@ def create_app(
         user: User = Depends(current_user),
     ) -> TunnelCloseResponse:
         try:
-            tunnel, session = await app_registry.close_tunnel(
+            tunnel, session = await registry.close_tunnel(
                 agent_id=agent_id,
                 user_id=user.id,
                 session_id=request.session_id,
@@ -391,7 +361,7 @@ def create_app(
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
         return TunnelCloseResponse(
             agent_id=session.agent_id,
@@ -402,8 +372,8 @@ def create_app(
             remote_port=tunnel.remote_port,
             client_token=tunnel.token,
             endpoint=TunnelEndpoint(
-                host=app_registry.tunnel_host,
-                port=app_registry.tunnel_port,
+                host=registry.tunnel_host,
+                port=registry.tunnel_port,
             ),
             created_at=tunnel.created_at,
             updated_at=tunnel.updated_at,
@@ -414,24 +384,24 @@ def create_app(
     @app.get("/v1/agents/{agent_id}", response_model=AgentStatusResponse)
     async def get_agent(agent_id: str, user: User = Depends(current_user)) -> AgentStatusResponse:
         try:
-            session = await app_registry.get_session(agent_id=agent_id, user_id=user.id)
+            session = await registry.get_session(agent_id=agent_id, user_id=user.id)
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except KeyError:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-        return _session_to_status(session, app_registry)
+        return _session_to_status(session, registry)
 
     @app.get("/v1/agents", response_model=AgentListResponse)
     async def list_agents(user: User = Depends(current_user)) -> AgentListResponse:
-        sessions = await app_registry.list_sessions(user_id=user.id)
+        sessions = await registry.list_sessions(user_id=user.id)
         return AgentListResponse(
-            agents=[_session_to_status(session, app_registry) for session in sessions]
+            agents=[_session_to_status(session, registry) for session in sessions]
         )
 
     @app.get("/v1/agents/{agent_id}/tunnels", response_model=TunnelListResponse)
     async def list_tunnels(agent_id: str, user: User = Depends(current_user)) -> TunnelListResponse:
         try:
-            session = await app_registry.get_session(agent_id=agent_id, user_id=user.id)
+            session = await registry.get_session(agent_id=agent_id, user_id=user.id)
         except PermissionError as exc:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except KeyError:
@@ -439,18 +409,102 @@ def create_app(
 
         return TunnelListResponse(
             agent_id=session.agent_id,
-            tunnels=[_tunnel_to_view(tunnel, app_registry) for tunnel in session.tunnels.values()],
+            tunnels=[_tunnel_to_view(tunnel, registry) for tunnel in session.tunnels.values()],
         )
 
-    register_ui_routes(
-        app,
-        db,
-        app_registry,
-        session_manager=session_manager,
-        secure_cookies=secure_cookies,
+
+def create_app(
+    *,
+    database: Database | None = None,
+    registry: AgentRegistry | None = None,
+    tunnel_host: str | None = None,
+    tunnel_port: int | None = None,
+    include_api: bool = True,
+    include_web: bool = True,
+) -> FastAPI:
+    """Instantiate the FastAPI application for the management plane."""
+
+    db = database or Database(resolve_database_path(os.getenv("MANAGEMENT_DB_PATH")))
+    _initialise_database(db)
+
+    app_registry = registry or AgentRegistry(
+        tunnel_host=tunnel_host or DEFAULT_TUNNEL_HOST,
+        tunnel_port=tunnel_port or DEFAULT_TUNNEL_PORT,
     )
+
+    app = FastAPI(
+        title="PlayrServers Management API",
+        version="0.1.0",
+        description="Control plane for authenticated hypervisor management tunnels.",
+    )
+
+    session_manager: SessionManager | None = None
+    secure_cookies = True
+    if include_web:
+        secure_cookies = _use_secure_cookies()
+        if not secure_cookies:
+            logger.warning(
+                "Session cookies are not marked as secure. Only disable secure cookies for"
+                " local development."
+            )
+        session_manager = SessionManager(ttl=timedelta(hours=8))
+
+    app.state.database = db
+    app.state.registry = app_registry
+    app.state.session_manager = session_manager
+
+    if include_api:
+        current_user = _build_auth_dependency(db)
+        register_api_routes(app, app_registry, current_user=current_user)
+
+    if include_web and session_manager is not None:
+        register_ui_routes(
+            app,
+            db,
+            app_registry,
+            session_manager=session_manager,
+            secure_cookies=secure_cookies,
+        )
 
     return app
 
 
-__all__ = ["create_app"]
+def create_api_app(
+    *,
+    database: Database | None = None,
+    registry: AgentRegistry | None = None,
+    tunnel_host: str | None = None,
+    tunnel_port: int | None = None,
+) -> FastAPI:
+    """Return an application exposing only the agent JSON API."""
+
+    return create_app(
+        database=database,
+        registry=registry,
+        tunnel_host=tunnel_host,
+        tunnel_port=tunnel_port,
+        include_api=True,
+        include_web=False,
+    )
+
+
+def create_web_app(
+    *,
+    database: Database | None = None,
+    registry: AgentRegistry | None = None,
+    tunnel_host: str | None = None,
+    tunnel_port: int | None = None,
+) -> FastAPI:
+    """Return an application exposing only the web dashboard."""
+
+    return create_app(
+        database=database,
+        registry=registry,
+        tunnel_host=tunnel_host,
+        tunnel_port=tunnel_port,
+        include_api=False,
+        include_web=True,
+    )
+
+
+__all__ = ["create_app", "create_api_app", "create_web_app"]

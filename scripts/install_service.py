@@ -221,10 +221,14 @@ def _render_systemd_unit(
         str(python_path),
         str(entry_path),
         "serve",
-        "--host",
+        "--api-host",
         "0.0.0.0",
-        "--port",
+        "--api-port",
         "8001",
+        "--web-host",
+        "0.0.0.0",
+        "--web-port",
+        "443",
         "--ssl-certfile",
         str(ssl_certfile),
         "--ssl-keyfile",
@@ -658,23 +662,9 @@ def main() -> int:
         return 1
 
     print("\nInstallation complete!\n")
-    print("Next steps:")
-    service_entry = ROOT / "main.py"
-    start_parts = [
-        "python",
-        str(service_entry),
-        "serve",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8001",
-        "--ssl-certfile",
-        str(cert_path),
-        "--ssl-keyfile",
-        str(key_path),
-    ]
-    start_command = shlex.join(start_parts)
-    print(f"  • Start the API with: {start_command}")
+    print("Service details:")
+    print("  • Web dashboard available over HTTPS on port 443")
+    print("  • Agent API available over HTTPS on port 8001")
     print(f"  • Database stored at: {db_path}")
     print(f"  • systemd unit installed at: {service_unit_path}")
     if generated_cert:

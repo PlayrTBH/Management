@@ -109,14 +109,16 @@ python scripts/create_user.py "Test User" test@example.com
 
 ### Running the management API
 
-Launch the API using the same credentials you created above. Provide the path to
-your TLS certificate and private key so the management portal is available over
-HTTPS on port 8001:
+Launch the management service using the same credentials you created above.
+Provide the path to your TLS certificate and private key so the agent API
+listens on port 8001 while the web dashboard is exposed on port 443:
 
 ```bash
 python main.py serve \
-  --host 0.0.0.0 \
-  --port 8001 \
+  --api-host 0.0.0.0 \
+  --api-port 8001 \
+  --web-host 0.0.0.0 \
+  --web-port 443 \
   --ssl-certfile /etc/ssl/certs/management.crt \
   --ssl-keyfile /etc/ssl/private/management.key
 ```
@@ -124,14 +126,15 @@ python main.py serve \
 When using `scripts/install.sh` or `scripts/install_service.py` without
 explicit TLS arguments the installer automatically provisions a self-signed
 certificate stored under `data/tls/`. The generated systemd unit references the
-certificate and key so the API is immediately reachable over HTTPS on port 8001;
-replace the files with a certificate issued by a trusted authority for
-production deployments.
+certificate and key so both the API (port 8001) and dashboard (port 443) are
+reachable over HTTPS; replace the files with a certificate issued by a trusted
+authority for production deployments.
 
-With the service running you can sign in at `https://localhost:8001/` (or the
-appropriate hostname) to access the new management dashboard. Sessions are
-kept in-memory on the server, so restarting the process will invalidate any
-active browser logins.
+With the service running you can sign in at `https://localhost/` (or the
+appropriate hostname) to access the new management dashboard. The JSON API
+remains available at `https://localhost:8001/`. Sessions are kept in-memory on
+the server, so restarting the process will invalidate any active browser
+logins.
 
 Agents authenticate with HTTP Basic credentials (email + password) and interact
 with the following key endpoints:

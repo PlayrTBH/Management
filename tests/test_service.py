@@ -295,6 +295,30 @@ class ManagementServiceTests(unittest.TestCase):
             self.assertEqual(landing.status_code, 200, landing.text)
             self.assertIn("Welcome back", landing.text)
 
+    def test_create_app_can_disable_specific_interfaces(self) -> None:
+        registry = AgentRegistry()
+        api_app = create_app(
+            database=self.database,
+            registry=registry,
+            include_api=True,
+            include_web=False,
+        )
+
+        with TestClient(api_app) as client:
+            self.assertEqual(client.get("/healthz").status_code, 200)
+            self.assertEqual(client.get("/").status_code, 404)
+
+        web_app = create_app(
+            database=self.database,
+            registry=registry,
+            include_api=False,
+            include_web=True,
+        )
+
+        with TestClient(web_app, base_url="https://testserver") as client:
+            self.assertEqual(client.get("/").status_code, 200)
+            self.assertEqual(client.get("/healthz").status_code, 404)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +194,80 @@ class ManagementServiceTests(unittest.TestCase):
             agent_info = payload["agents"][0]
             self.assertEqual(agent_info["agent_id"], "agent-list")
             self.assertEqual(agent_info["hostname"], "hypervisor-list")
+
+    def test_hypervisor_detail_management_endpoints(self) -> None:
+        registry = AgentRegistry()
+        app = create_app(database=self.database, registry=registry)
+
+        cpu_payload = [
+            {"id": 0, "label": "Core 0", "usage": 42.5},
+            {"id": 1, "label": "Core 1", "usage": 87.0},
+        ]
+        vm_payload = [
+            {
+                "id": "web-01",
+                "name": "web-01",
+                "status": "running",
+                "power_state": "running",
+                "cpu": "2 vCPU",
+                "memory": "4 GiB",
+            },
+            {
+                "id": "db-01",
+                "name": "db-01",
+                "status": "stopped",
+                "power_state": "shut off",
+                "cpu": "4 vCPU",
+                "memory": "8 GiB",
+            },
+        ]
+
+        with TestClient(app, base_url="https://testserver") as client:
+            connect = client.post(
+                "/v1/agents/connect",
+                auth=self._auth(),
+                json={
+                    "agent_id": "agent-detail",
+                    "hostname": "hypervisor-detail",
+                    "metadata": {
+                        "cpu_cores": json.dumps(cpu_payload),
+                        "vms": json.dumps(vm_payload),
+                        "ssh_login": "admin",
+                        "ssh_user": "tunnels",
+                        "memory_total": "64 GiB",
+                    },
+                },
+            )
+            self.assertEqual(connect.status_code, 200, connect.text)
+
+            login = client.post(
+                "/login",
+                data={"email": self.user_email, "password": self.user_password},
+                follow_redirects=True,
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+
+            detail = client.get("/hypervisors/agent-detail")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            body = detail.text
+            self.assertIn("Core 0", body)
+            self.assertIn("web-01", body)
+            self.assertIn("Launch terminal", body)
+            self.assertIn("admin@hypervisor-detail", body)
+
+            terminal = client.post("/hypervisors/agent-detail/terminal")
+            self.assertEqual(terminal.status_code, 200, terminal.text)
+            terminal_payload = terminal.json()
+            self.assertIn("ssh_command", terminal_payload)
+            self.assertIn("sshpass", terminal_payload["ssh_command"])
+            self.assertEqual(terminal_payload["remote_port"], 2200)
+            self.assertEqual(terminal_payload["local_port"], 22)
+
+            vm_action = client.post("/hypervisors/agent-detail/vms/web-01/start")
+            self.assertEqual(vm_action.status_code, 202, vm_action.text)
+            action_payload = vm_action.json()
+            self.assertEqual(action_payload["action"], "start")
+            self.assertEqual(action_payload["vm"], "web-01")
 
     def test_dashboard_displays_connected_hypervisors(self) -> None:
         registry = AgentRegistry()

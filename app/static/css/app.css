@@ -350,6 +350,16 @@ body {
   box-shadow: 0 14px 32px rgba(15, 23, 42, 0.12);
 }
 
+.table__link {
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.table__link:hover {
+  color: var(--accent);
+}
+
 .table__cell--emphasis {
   font-weight: 600;
 }
@@ -377,6 +387,147 @@ body {
 
 .text-muted {
   color: var(--text-muted);
+}
+
+.metric-list {
+  display: grid;
+  gap: 1rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.metric-list__item {
+  display: grid;
+  grid-template-columns: minmax(100px, auto) 1fr auto;
+  align-items: center;
+  gap: 1rem;
+}
+
+.metric-list__label {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.metric-bar {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.25);
+  overflow: hidden;
+}
+
+.metric-bar__fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.85), rgba(37, 99, 235, 0.95));
+  transform-origin: left;
+}
+
+.metric-list__value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.metric-list__value--high {
+  color: #dc2626;
+}
+
+.metric-list__value--healthy {
+  color: var(--success);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.badge--accent {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent);
+}
+
+.badge-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.vm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.vm-actions .button {
+  padding: 0.55rem 1rem;
+  font-size: 0.9rem;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.08);
+  color: var(--accent);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+}
+
+.vm-actions .button:hover {
+  background: rgba(37, 99, 235, 0.15);
+}
+
+.vm-actions .button[data-action="force-stop"] {
+  color: var(--danger);
+  border-color: rgba(220, 38, 38, 0.3);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.vm-actions .button[data-action="force-stop"]:hover {
+  background: rgba(220, 38, 38, 0.12);
+}
+
+.ssh-terminal {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.85);
+  color: #e2e8f0;
+  font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.95rem;
+}
+
+.ssh-terminal__output {
+  min-height: 120px;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+.ssh-terminal__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.ssh-terminal__actions .button {
+  background: rgba(37, 99, 235, 0.12);
+  color: #bfdbfe;
+  border: 1px solid rgba(37, 99, 235, 0.45);
+}
+
+.ssh-terminal__actions .button:hover {
+  background: rgba(37, 99, 235, 0.2);
+}
+
+.ssh-terminal__status {
+  font-size: 0.85rem;
+  color: #cbd5f5;
+  margin-top: 0.5rem;
 }
 
 .empty-state {

@@ -368,23 +368,43 @@ class AgentRuntime:
                 _LOGGER.warning("Missing tunnel metadata for %s", identifier)
                 continue
             client_token = detail.get("client_token") or ""
-            await self._ensure_tunnel(identifier, remote_port, client_token)
+            metadata = detail.get("metadata") if isinstance(detail, dict) else None
+            await self._ensure_tunnel(identifier, remote_port, client_token, metadata)
 
         active_identifiers = set(state.keys())
         for identifier in list(self._tunnels.keys()):
             if identifier not in active_identifiers:
                 await self._stop_tunnel(identifier)
 
-    async def _ensure_tunnel(self, identifier: str, remote_port: int, client_token: str) -> None:
+    async def _ensure_tunnel(
+        self,
+        identifier: str,
+        remote_port: int,
+        client_token: str,
+        metadata: Dict[str, object] | None = None,
+    ) -> None:
         tunnel = self._tunnels.get(identifier)
         if tunnel and tunnel.is_active():
             return
+        local_port = remote_port
+        if metadata:
+            local_override = metadata.get("local_port") or metadata.get("target_port")
+            if local_override is not None:
+                try:
+                    local_port = int(str(local_override))
+                except ValueError:
+                    _LOGGER.warning(
+                        "Ignoring invalid local_port override for tunnel %s: %r",
+                        identifier,
+                        local_override,
+                    )
         tunnel = TunnelProcess(
             identifier=identifier,
             remote_port=remote_port,
             client_token=client_token,
             ssh_settings=self.config.ssh,
             tunnel_host=self.config.tunnel_host,
+            local_port=local_port,
         )
         self._tunnels[identifier] = tunnel
         try:

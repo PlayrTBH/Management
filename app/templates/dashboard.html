@@ -66,7 +66,9 @@
     </div>
     {% for hypervisor in hypervisors %}
     <div class="table__row">
-      <span class="table__cell table__cell--emphasis">{{ hypervisor.agent_id }}</span>
+      <span class="table__cell table__cell--emphasis">
+        <a class="table__link" href="{{ request.url_for('ui_hypervisor', agent_id=hypervisor.agent_id) }}">{{ hypervisor.agent_id }}</a>
+      </span>
       <span class="table__cell">{{ hypervisor.hostname }}</span>
       <span class="table__cell">
         <span class="status-pill{% if hypervisor.is_online %} status-pill--success{% else %} status-pill--muted{% endif %}">

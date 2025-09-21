@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -41,6 +43,28 @@ class HypervisorSummary:
     active_tunnels: int
     pending_tunnels: int
     closed_tunnels: int
+
+
+@dataclass(frozen=True)
+class CPUCoreMetric:
+    """Describes utilisation for a single CPU core."""
+
+    id: str
+    label: str
+    usage: float
+
+
+@dataclass(frozen=True)
+class VirtualMachineEntry:
+    """Represents a guest exposed by a hypervisor."""
+
+    id: str
+    name: str
+    status: Optional[str]
+    power_state: Optional[str]
+    cpu: Optional[str]
+    memory: Optional[str]
+    metadata: Dict[str, str]
 
 
 def _template_environment() -> Jinja2Templates:
@@ -85,6 +109,324 @@ def _session_to_summary(session: AgentSession, registry: AgentRegistry) -> Hyper
         pending_tunnels=pending,
         closed_tunnels=closed,
     )
+
+
+def _normalise_percentage(value: Any) -> Optional[float]:
+    """Convert assorted metric formats into a percentage."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if cleaned.endswith("%"):
+            cleaned = cleaned[:-1]
+        try:
+            number = float(cleaned)
+        except ValueError:
+            return None
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+
+    if number < 0:
+        number = 0.0
+    if number > 100:
+        number = min(number, 100.0)
+    return number
+
+
+def _parse_cpu_metrics(metadata: Mapping[str, str]) -> List[CPUCoreMetric]:
+    """Extract per-core utilisation readings from agent metadata."""
+
+    cores: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure_core(identifier: str) -> Dict[str, Any]:
+        entry = cores.setdefault(identifier, {"label": f"Core {identifier}", "usage": None})
+        return entry
+
+    def _ingest_mapping(index: int, entry: Mapping[str, Any]) -> None:
+        core_id = str(entry.get("id") or entry.get("core") or entry.get("index") or index)
+        info = _ensure_core(core_id)
+        label = entry.get("label") or entry.get("name") or entry.get("title")
+        if label:
+            info["label"] = str(label)
+        usage = (
+            _normalise_percentage(
+                entry.get("usage")
+                or entry.get("value")
+                or entry.get("percent")
+                or entry.get("utilisation")
+                or entry.get("load")
+                or entry.get("usage_percent")
+            )
+        )
+        if usage is not None:
+            info["usage"] = usage
+
+    json_candidates = (
+        metadata.get("cpu_cores"),
+        metadata.get("cpu.cores"),
+        metadata.get("cpu.core_stats"),
+    )
+    for candidate in json_candidates:
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            if isinstance(payload.get("cores"), list):
+                payload = payload["cores"]
+            else:
+                payload = list(payload.values())
+        if not isinstance(payload, list):
+            continue
+        for index, entry in enumerate(payload):
+            if isinstance(entry, Mapping):
+                _ingest_mapping(index, entry)
+                continue
+            usage = _normalise_percentage(entry)
+            if usage is None:
+                continue
+            core_id = str(index)
+            info = _ensure_core(core_id)
+            info["usage"] = usage
+
+    core_key = re.compile(r"^cpu[._-]?core[._-]?(?P<id>\d+)(?:[._-]?(?P<field>[A-Za-z0-9_]+))?$", re.IGNORECASE)
+    for key, value in metadata.items():
+        match = core_key.match(key)
+        if not match:
+            continue
+        core_id = match.group("id")
+        field = match.group("field")
+        info = _ensure_core(core_id)
+        if field is None:
+            usage = _normalise_percentage(value)
+            if usage is not None:
+                info["usage"] = usage
+            continue
+        field_lower = field.lower()
+        if field_lower in {"usage", "util", "percent", "load"}:
+            usage = _normalise_percentage(value)
+            if usage is not None:
+                info["usage"] = usage
+        elif field_lower in {"label", "name", "title"}:
+            info["label"] = str(value)
+
+    metrics: List[CPUCoreMetric] = []
+    for identifier, info in cores.items():
+        usage = info.get("usage")
+        if usage is None:
+            continue
+        label = str(info.get("label") or f"Core {identifier}")
+        metrics.append(CPUCoreMetric(id=identifier, label=label, usage=float(usage)))
+
+    metrics.sort(key=lambda item: int(item.id) if item.id.isdigit() else item.id)
+    return metrics
+
+
+_VM_METADATA_PATTERN = re.compile(r"^(?:vm|virtual_machine)[._-](?P<id>[A-Za-z0-9_.:-]+)[._-](?P<field>[A-Za-z0-9_.:-]+)$")
+
+
+def _parse_virtual_machines(metadata: Mapping[str, str]) -> List[VirtualMachineEntry]:
+    """Normalise metadata into structured VM entries."""
+
+    entries: Dict[str, Dict[str, Any]] = {}
+
+    def _ensure_vm(vm_id: str) -> Dict[str, Any]:
+        record = entries.setdefault(vm_id, {"id": vm_id, "name": vm_id, "metadata": {}})
+        return record
+
+    json_candidates = (
+        metadata.get("vms"),
+        metadata.get("virtual_machines"),
+        metadata.get("vm_list"),
+        metadata.get("vm.inventory"),
+    )
+
+    for candidate in json_candidates:
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            if isinstance(payload.get("vms"), list):
+                payload = payload["vms"]
+            elif isinstance(payload.get("items"), list):
+                payload = payload["items"]
+            else:
+                payload = list(payload.values())
+        if not isinstance(payload, list):
+            continue
+        for index, entry in enumerate(payload):
+            if isinstance(entry, Mapping):
+                vm_id = str(entry.get("id") or entry.get("uuid") or entry.get("name") or f"vm-{index}")
+                record = _ensure_vm(vm_id)
+                if entry.get("name"):
+                    record["name"] = str(entry.get("name"))
+                status_value = entry.get("status") or entry.get("state")
+                if status_value:
+                    record["status"] = str(status_value)
+                power_value = entry.get("power_state") or entry.get("power")
+                if power_value:
+                    record["power_state"] = str(power_value)
+                cpu_value = entry.get("cpu") or entry.get("vcpus")
+                if cpu_value is not None:
+                    record["cpu"] = str(cpu_value)
+                memory_value = entry.get("memory") or entry.get("ram")
+                if memory_value is not None:
+                    record["memory"] = str(memory_value)
+                extras = {
+                    str(k): str(v)
+                    for k, v in entry.items()
+                    if k
+                    not in {
+                        "id",
+                        "uuid",
+                        "name",
+                        "status",
+                        "state",
+                        "power_state",
+                        "power",
+                        "cpu",
+                        "vcpus",
+                        "memory",
+                        "ram",
+                    }
+                }
+                if extras:
+                    _ensure_vm(vm_id)["metadata"].update(extras)
+            elif isinstance(entry, str):
+                vm_name = entry.strip()
+                if not vm_name:
+                    continue
+                record = _ensure_vm(vm_name)
+                record["name"] = vm_name
+
+    for key, value in metadata.items():
+        match = _VM_METADATA_PATTERN.match(key)
+        if not match:
+            continue
+        vm_id = match.group("id")
+        field = match.group("field").lower()
+        record = _ensure_vm(vm_id)
+        if field in {"name", "label", "title"}:
+            record["name"] = str(value)
+        elif field in {"status", "state"}:
+            record["status"] = str(value)
+        elif field in {"power", "power_state"}:
+            record["power_state"] = str(value)
+        elif field in {"cpu", "vcpus"}:
+            record["cpu"] = str(value)
+        elif field in {"memory", "ram"}:
+            record["memory"] = str(value)
+        else:
+            record.setdefault("metadata", {})[field] = str(value)
+
+    virtual_machines: List[VirtualMachineEntry] = []
+    for vm_id, record in entries.items():
+        metadata_payload = {str(k): str(v) for k, v in record.get("metadata", {}).items()}
+        virtual_machines.append(
+            VirtualMachineEntry(
+                id=vm_id,
+                name=str(record.get("name") or vm_id),
+                status=record.get("status"),
+                power_state=record.get("power_state"),
+                cpu=record.get("cpu"),
+                memory=record.get("memory"),
+                metadata=metadata_payload,
+            )
+        )
+
+    virtual_machines.sort(key=lambda entry: entry.name.lower())
+    return virtual_machines
+
+
+def _collect_host_overview(summary: HypervisorSummary) -> List[Tuple[str, str]]:
+    """Produce key/value pairs describing the host."""
+
+    overview: List[Tuple[str, str]] = [
+        ("Hostname", summary.hostname),
+        ("Status", "Online" if summary.is_online else "Offline"),
+        ("Endpoint", f"{summary.endpoint_host}:{summary.endpoint_port}"),
+        ("Connected", _format_datetime(summary.connected_at)),
+        ("Last seen", _format_datetime(summary.last_seen)),
+        (
+            "Tunnels",
+            f"{summary.active_tunnels} active"
+            + (f" · {summary.pending_tunnels} pending" if summary.pending_tunnels else "")
+            + (f" · {summary.closed_tunnels} closed" if summary.closed_tunnels else ""),
+        ),
+    ]
+
+    metadata = summary.metadata
+
+    def _pick(keys: Iterable[str]) -> Optional[str]:
+        for key in keys:
+            value = metadata.get(key)
+            if value:
+                return value
+        return None
+
+    additional = [
+        ("Operating system", ("os_name", "os")),
+        ("Kernel", ("kernel", "os_kernel")),
+        ("Architecture", ("architecture", "arch")),
+        ("CPU model", ("cpu_model", "cpu.model", "cpu")),
+        ("Physical cores", ("cpu_physical_cores", "cpu.physical_cores")),
+        ("Logical cores", ("cpu_logical_cores", "cpu.logical_cores")),
+        ("Total memory", ("memory_total", "memory.total", "memory")),
+        ("Uptime", ("uptime", "host_uptime", "system_uptime")),
+        ("Agent", ("provisioned_by", "agent_version")),
+    ]
+    for label, keys in additional:
+        value = _pick(keys)
+        if value:
+            overview.append((label, value))
+
+    return overview
+
+
+def _resolve_ssh_defaults(metadata: Mapping[str, str]) -> tuple[str, str, int]:
+    """Return sensible defaults for SSH connectivity."""
+
+    def _pick(keys: Iterable[str], default: str) -> str:
+        for key in keys:
+            value = metadata.get(key)
+            if value:
+                return str(value)
+        return default
+
+    bastion_user = _pick(("ssh_user", "ssh.user", "bastion_user"), "tunnels")
+    login_user = _pick(("ssh_login", "ssh.login", "default_login", "hypervisor_user"), "root")
+    port_raw = _pick(("ssh_port", "ssh.port", "local_ssh_port"), "22")
+    try:
+        local_port = int(str(port_raw))
+    except ValueError:
+        local_port = 22
+    return bastion_user, login_user, local_port
+
+
+def _next_remote_port(session: AgentSession, *, start: int = 2200) -> int:
+    """Choose a remote port for a new tunnel, avoiding collisions."""
+
+    used_ports = {tunnel.remote_port for tunnel in session.tunnels.values()}
+    port = start
+    while port in used_ports and port < 64000:
+        port += 1
+    if port in used_ports:
+        # All high ports exhausted; fall back to a lower, but safe range.
+        port = 1025
+        while port in used_ports and port < 2000:
+            port += 1
+    return port
 
 
 def register_ui_routes(
@@ -283,10 +625,13 @@ def register_ui_routes(
             if summary.closed_tunnels:
                 tunnel_parts.append(f"{summary.closed_tunnels} closed")
             tunnels_text = " · ".join(tunnel_parts)
+            detail_url = html.escape(
+                str(request.url_for("ui_hypervisor", agent_id=summary.agent_id))
+            )
             rows.append(
                 """
     <div class="table__row">
-      <span class="table__cell table__cell--emphasis">{agent}</span>
+      <span class="table__cell table__cell--emphasis"><a class="table__link" href="{detail_url}">{agent}</a></span>
       <span class="table__cell">{hostname}</span>
       <span class="table__cell"><span class="{status_class}">{status_label}</span></span>
       <span class="table__cell">{capabilities}</span>
@@ -294,6 +639,7 @@ def register_ui_routes(
       <span class="table__cell">{tunnels}</span>
     </div>
 """.format(
+                    detail_url=detail_url,
                     agent=html.escape(summary.agent_id),
                     hostname=html.escape(summary.hostname),
                     status_class=status_class,
@@ -422,6 +768,108 @@ def register_ui_routes(
         if templates is not None:
             return templates.TemplateResponse("agent_installer.html", context)
         markup = _render_agent_installer_markup(context, request)
+        return HTMLResponse(markup)
+
+    def _render_hypervisor_markup(context: Dict[str, object], request: Request) -> str:
+        hypervisor = context.get("hypervisor")
+        if not isinstance(hypervisor, HypervisorSummary):
+            raise AssertionError("Missing hypervisor context")
+        host_overview = context.get("host_overview", [])
+        cpu_metrics = context.get("cpu_metrics", [])
+        virtual_machines = context.get("virtual_machines", [])
+        ssh_command = context.get("ssh_command_example")
+        stylesheet = request.url_for("static", path="css/app.css")
+
+        overview_rows = [
+            """
+    <div class=\"detail-grid__item\"><dt>{label}</dt><dd>{value}</dd></div>
+""".format(label=html.escape(str(label)), value=html.escape(str(value)))
+            for label, value in host_overview
+        ]
+        overview_html = "\n".join(overview_rows)
+
+        if cpu_metrics:
+            metric_rows = [
+                """
+      <li class=\"metric-list__item\">
+        <span class=\"metric-list__label\">{label}</span>
+        <div class=\"metric-bar\"><div class=\"metric-bar__fill\" style=\"width: {usage:.2f}%\"></div></div>
+        <span class=\"metric-list__value\">{usage:.1f}%</span>
+      </li>
+""".format(label=html.escape(metric.label), usage=metric.usage)
+                for metric in cpu_metrics
+            ]
+            metrics_html = "<ul class=\"metric-list\">\n" + "\n".join(metric_rows) + "\n    </ul>"
+        else:
+            metrics_html = "<p class=\"text-muted\">No performance metrics reported yet.</p>"
+
+        if virtual_machines:
+            vm_rows = [
+                """
+      <li><strong>{name}</strong> – {status}</li>
+""".format(
+                    name=html.escape(vm.name),
+                    status=html.escape(vm.status or "Unknown"),
+                )
+                for vm in virtual_machines
+            ]
+            vm_html = "<ul>\n" + "\n".join(vm_rows) + "\n    </ul>"
+        else:
+            vm_html = "<p class=\"text-muted\">No virtual machines reported.</p>"
+
+        ssh_html = ""
+        if ssh_command:
+            ssh_html = """
+    <div class=\"callout\"><code>{command}</code></div>
+""".format(command=html.escape(str(ssh_command)))
+
+        body = f"""
+<header class=\"page-head\">
+  <div class=\"page-head__content\">
+    <h1 class=\"page-head__title\">{html.escape(hypervisor.agent_id)}</h1>
+    <p class=\"page-head__subtitle\">Management view for {html.escape(hypervisor.hostname)}.</p>
+  </div>
+  <div class=\"page-head__actions\">
+    <a class=\"button button--primary\" href=\"{request.url_for('ui_dashboard')}\">Back to dashboard</a>
+  </div>
+</header>
+
+<section class=\"card\">
+  <h2 class=\"card__title\">Host overview</h2>
+  <dl class=\"detail-grid\">
+{overview_html}
+  </dl>
+</section>
+
+<section class=\"card\">
+  <h2 class=\"card__title\">Performance metrics</h2>
+{metrics_html}
+</section>
+
+<section class=\"card\">
+  <h2 class=\"card__title\">Virtual machines</h2>
+{vm_html}
+</section>
+
+<section class=\"card\">
+  <h2 class=\"card__title\">SSH terminal</h2>
+  <p>Request a secure shell via the management plane.</p>
+{ssh_html}
+</section>
+"""
+
+        return _build_base_markup(
+            request,
+            user=context.get("user"),
+            title=f"{hypervisor.agent_id} · Hypervisor · PlayrServers Management",
+            stylesheet=str(stylesheet),
+            content=body,
+        )
+
+    def _render_hypervisor_response(request: Request, context: Dict[str, object]) -> HTMLResponse:
+        if templates is not None:
+            return templates.TemplateResponse("hypervisor.html", context)
+        markup = _render_hypervisor_markup(context, request)
         return HTMLResponse(markup)
 
     def _agent_installer_context(
@@ -609,6 +1057,172 @@ def register_ui_routes(
         if token:
             _issue_session_cookie(response, token)
         return response
+
+    @router.get("/hypervisors/{agent_id}", response_class=HTMLResponse, name="ui_hypervisor")
+    async def hypervisor_detail(agent_id: str, request: Request):
+        user, token = _load_user(request)
+        if user is None:
+            response = RedirectResponse(
+                request.url_for("ui_login"), status_code=status.HTTP_303_SEE_OTHER
+            )
+            if token:
+                _clear_session_cookie(response, token)
+            return response
+
+        try:
+            session = await registry.get_session(agent_id=agent_id, user_id=user.id)
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Hypervisor not found") from exc
+
+        summary = _session_to_summary(session, registry)
+        host_overview = _collect_host_overview(summary)
+        bastion_user, login_user, local_port = _resolve_ssh_defaults(session.metadata)
+        if login_user:
+            host_overview.append(("SSH login", f"{login_user}@{summary.hostname}"))
+
+        cpu_metrics = _parse_cpu_metrics(session.metadata)
+        virtual_machines = _parse_virtual_machines(session.metadata)
+        ssh_example = (
+            f"ssh -o ProxyCommand=\"ssh -W 127.0.0.1:<remote-port> {bastion_user}@{summary.endpoint_host} "
+            f"-p {summary.endpoint_port}\" {login_user}@127.0.0.1"
+        )
+
+        context = _base_context(
+            request,
+            user,
+            hypervisor=summary,
+            host_overview=host_overview,
+            cpu_metrics=cpu_metrics,
+            virtual_machines=virtual_machines,
+            ssh_defaults={
+                "bastion_user": bastion_user,
+                "login_user": login_user,
+                "local_port": local_port,
+            },
+            ssh_command_example=ssh_example,
+        )
+        response = _render_hypervisor_response(request, context)
+        if token:
+            _issue_session_cookie(response, token)
+        return response
+
+    @router.post("/hypervisors/{agent_id}/terminal", name="ui_hypervisor_terminal")
+    async def hypervisor_terminal(agent_id: str, request: Request):
+        user, _ = _load_user(request)
+        if user is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+        try:
+            session = await registry.get_session(agent_id=agent_id, user_id=user.id)
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Hypervisor not found") from exc
+
+        if session.expires_at(registry.session_timeout) <= datetime.now(timezone.utc):
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Hypervisor is offline")
+
+        summary = _session_to_summary(session, registry)
+        bastion_user, login_user, local_port = _resolve_ssh_defaults(session.metadata)
+        remote_port = _next_remote_port(session)
+
+        metadata = {
+            "local_port": str(local_port),
+            "target_user": login_user,
+            "kind": "ssh-terminal",
+        }
+
+        tunnel, _ = await registry.create_tunnel(
+            agent_id=agent_id,
+            user_id=user.id,
+            session_id=session.session_id,
+            token=session.token,
+            purpose="ssh-terminal",
+            remote_port=remote_port,
+            description="Web SSH session",
+            metadata=metadata,
+        )
+
+        ssh_command = (
+            "ssh -o ProxyCommand=\"sshpass -p '{token}' ssh -W 127.0.0.1:{remote_port} "
+            "{bastion}@{host} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" "
+            "{login}@127.0.0.1 -p {local_port}"
+        ).format(
+            token=tunnel.token,
+            remote_port=tunnel.remote_port,
+            bastion=bastion_user,
+            host=summary.endpoint_host,
+            port=summary.endpoint_port,
+            login=login_user,
+            local_port=local_port,
+        )
+
+        message = (
+            f"Tunnel {tunnel.id} established. Connect as {login_user}@127.0.0.1 using the command below."
+        )
+
+        payload = {
+            "tunnel_id": tunnel.id,
+            "remote_port": tunnel.remote_port,
+            "local_port": local_port,
+            "client_token": tunnel.token,
+            "endpoint": {"host": summary.endpoint_host, "port": summary.endpoint_port},
+            "ssh_command": ssh_command,
+            "message": message,
+        }
+        return JSONResponse(payload)
+
+    @router.post(
+        "/hypervisors/{agent_id}/vms/{vm_id}/{action}",
+        name="ui_hypervisor_vm_action",
+    )
+    async def hypervisor_vm_action(agent_id: str, vm_id: str, action: str, request: Request):
+        user, _ = _load_user(request)
+        if user is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+        try:
+            session = await registry.get_session(agent_id=agent_id, user_id=user.id)
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Hypervisor not found") from exc
+
+        if session.expires_at(registry.session_timeout) <= datetime.now(timezone.utc):
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Hypervisor is offline")
+
+        action_key = action.lower()
+        supported_actions = {"start", "stop", "restart", "force-stop", "console"}
+        if action_key not in supported_actions:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Unsupported action")
+
+        virtual_machines = _parse_virtual_machines(session.metadata)
+        target_vm: Optional[VirtualMachineEntry] = None
+        for vm in virtual_machines:
+            if vm.id == vm_id or vm.name == vm_id:
+                target_vm = vm
+                break
+
+        logger.info(
+            "User %s queued action %s for VM %s on hypervisor %s",
+            user.id,
+            action_key,
+            vm_id,
+            agent_id,
+        )
+
+        if target_vm is None:
+            detail_message = (
+                f"Queued {action_key} for {vm_id}. Waiting for the agent to reconcile the VM inventory."
+            )
+        else:
+            detail_message = f"Queued {action_key} for {target_vm.name}."
+
+        return JSONResponse(
+            {
+                "status": "accepted",
+                "action": action_key,
+                "vm": target_vm.name if target_vm else vm_id,
+                "message": detail_message,
+            },
+            status_code=status.HTTP_202_ACCEPTED,
+        )
 
     @router.get("/installers/agent", response_class=HTMLResponse, name="ui_agent_installer")
     async def agent_installer(request: Request):

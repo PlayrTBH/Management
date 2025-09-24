@@ -322,6 +322,15 @@ def register_api_routes(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
+        logger.info(
+            "User %s opened tunnel %s on agent %s (purpose=%s, remote_port=%s)",
+            user.id,
+            tunnel.id,
+            session.agent_id,
+            tunnel.purpose,
+            tunnel.remote_port,
+        )
+
         return TunnelCreateResponse(
             agent_id=session.agent_id,
             session_id=session.session_id,
@@ -364,6 +373,15 @@ def register_api_routes(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+        logger.info(
+            "User %s closed tunnel %s on agent %s (purpose=%s, remote_port=%s)",
+            user.id,
+            tunnel.id,
+            session.agent_id,
+            tunnel.purpose,
+            tunnel.remote_port,
+        )
 
         return TunnelCloseResponse(
             agent_id=session.agent_id,

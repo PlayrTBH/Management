@@ -1166,6 +1166,15 @@ def register_ui_routes(
             metadata=metadata,
         )
 
+        logger.info(
+            "User %s requested SSH terminal for agent %s via tunnel %s (local_port=%s, remote_port=%s)",
+            user.id,
+            agent_id,
+            tunnel.id,
+            local_port,
+            tunnel.remote_port,
+        )
+
         message = (
             "Tunnel ready. Opening a root session through the management plane."
         )
@@ -1206,6 +1215,13 @@ def register_ui_routes(
             await _close_websocket(websocket, code=status.WS_1008_POLICY_VIOLATION)
             return
 
+        logger.info(
+            "User %s attaching to SSH terminal tunnel %s on agent %s",
+            user.id,
+            tunnel_id,
+            agent_id,
+        )
+
         await websocket.accept()
 
         remote_port = tunnel.remote_port
@@ -1225,6 +1241,12 @@ def register_ui_routes(
                 break
 
         if connection_host is None:
+            logger.warning(
+                "SSH tunnel %s for agent %s is not reachable for user %s",
+                tunnel_id,
+                agent_id,
+                user.id,
+            )
             with contextlib.suppress(Exception):
                 await websocket.send_text(
                     "Unable to reach the remote tunnel. The hypervisor may still be initialising."
@@ -1268,7 +1290,19 @@ def register_ui_routes(
                 stderr=slave_fd,
                 env=env,
             )
+            logger.info(
+                "Started SSH subprocess for user %s on agent %s via tunnel %s (host=%s, port=%s)",
+                user.id,
+                agent_id,
+                tunnel_id,
+                connection_host,
+                remote_port,
+            )
         except FileNotFoundError:
+            logger.error(
+                "SSH binary is not available on the management host while handling tunnel %s",
+                tunnel_id,
+            )
             with contextlib.suppress(Exception):
                 await websocket.send_text("SSH binary is not available on the management host.")
             await _close_websocket(websocket, code=status.WS_1011_INTERNAL_ERROR)
@@ -1353,6 +1387,14 @@ def register_ui_routes(
 
         with contextlib.suppress(OSError):
             os.close(master_fd)
+
+        logger.info(
+            "SSH session for user %s on agent %s via tunnel %s ended with exit code %s",
+            user.id,
+            agent_id,
+            tunnel_id,
+            exit_code,
+        )
 
         try:
             await registry.close_tunnel(

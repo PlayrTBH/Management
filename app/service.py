@@ -277,7 +277,7 @@ def register_api_routes(
         user: User = Depends(current_user),
     ) -> AgentHeartbeatResponse:
         try:
-            session = await registry.heartbeat(
+            session, activated_tunnels = await registry.heartbeat(
                 agent_id=agent_id,
                 user_id=user.id,
                 session_id=request.session_id,
@@ -291,6 +291,15 @@ def register_api_routes(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except KeyError:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+        for tunnel in activated_tunnels:
+            logger.info(
+                "Reverse tunnel %s for agent %s is now active (purpose=%s, remote_port=%s)",
+                tunnel.id,
+                session.agent_id,
+                tunnel.purpose,
+                tunnel.remote_port,
+            )
 
         return _heartbeat_to_response(session, registry)
 
@@ -323,13 +332,27 @@ def register_api_routes(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
         logger.info(
-            "User %s opened tunnel %s on agent %s (purpose=%s, remote_port=%s)",
+            "User %s opened reverse tunnel %s on agent %s (purpose=%s, remote_port=%s)",
             user.id,
             tunnel.id,
             session.agent_id,
             tunnel.purpose,
             tunnel.remote_port,
         )
+
+        tunnel_kind = tunnel.metadata.get("kind") if tunnel.metadata else None
+        if tunnel.purpose == "ssh-terminal" or tunnel_kind == "ssh-terminal":
+            target_user = tunnel.metadata.get("target_user") if tunnel.metadata else None
+            local_port = tunnel.metadata.get("local_port") if tunnel.metadata else None
+            logger.info(
+                "User %s initiated SSH session on agent %s via tunnel %s (target_user=%s, local_port=%s, remote_port=%s)",
+                user.id,
+                session.agent_id,
+                tunnel.id,
+                target_user or "root",
+                local_port,
+                tunnel.remote_port,
+            )
 
         return TunnelCreateResponse(
             agent_id=session.agent_id,

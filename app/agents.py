@@ -225,7 +225,7 @@ class AgentRegistry:
         token: str,
         active_tunnels: Iterable[str] | None = None,
         metadata: Mapping[str, str] | None = None,
-    ) -> AgentSession:
+    ) -> tuple[AgentSession, List[Tunnel]]:
         """Update the activity timestamp for an agent and refresh tunnel state."""
 
         normalised_id = _normalise_agent_id(agent_id)
@@ -239,12 +239,13 @@ class AgentRegistry:
 
             now = _utcnow()
             session.last_seen = now
+            activated: List[Tunnel] = []
             if active_tunnels is not None:
-                self._update_tunnel_activity(session, active_tunnels, now)
+                activated = self._update_tunnel_activity(session, active_tunnels, now)
             if metadata:
                 normalised_metadata = _normalise_metadata(metadata)
                 session.metadata.update(normalised_metadata)
-            return session
+            return session, activated
 
     async def create_tunnel(
         self,
@@ -372,19 +373,22 @@ class AgentRegistry:
         session: AgentSession,
         active_tunnels: Iterable[str],
         timestamp: datetime,
-    ) -> None:
+    ) -> List[Tunnel]:
         active = {identifier.strip() for identifier in active_tunnels if identifier.strip()}
+        activated: List[Tunnel] = []
         for tunnel_id, tunnel in session.tunnels.items():
             if tunnel.state == TunnelState.CLOSED:
                 continue
             if tunnel_id in active:
                 if tunnel.state != TunnelState.ACTIVE:
                     tunnel.state = TunnelState.ACTIVE
+                    activated.append(tunnel)
                 tunnel.updated_at = timestamp
             else:
                 if tunnel.state != TunnelState.PENDING:
                     tunnel.state = TunnelState.PENDING
                     tunnel.updated_at = timestamp
+        return activated
 
     def _prune_expired_locked(self) -> None:
         now = _utcnow()
